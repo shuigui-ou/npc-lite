@@ -213,8 +213,11 @@ print(json.dumps(check_npc_response(
 ```bash
 # MiniMax（M plan，OpenAI 兼容）
 export MINIMAX_API_KEY="你的key"
-python adversarial_test.py --provider minimax --rounds 12
-python adversarial_test.py --provider minimax --rounds 12 --raw   # 对照组
+python adversarial_test.py --provider minimax --rounds 14
+python adversarial_test.py --provider minimax --rounds 14 --raw          # 对照组
+# 渐进式 de-escalation（更严格的真实场景对抗，推荐）
+python adversarial_test.py --provider minimax --rounds 14 --escalation
+python adversarial_test.py --provider minimax --rounds 14 --escalation --raw
 
 # 其他 provider
 export ZHIPU_API_KEY="...";      python adversarial_test.py --provider zhipu
@@ -222,7 +225,9 @@ export DASHSCOPE_API_KEY="...";  python adversarial_test.py --provider dashscope
 export DEEPSEEK_API_KEY="...";   python adversarial_test.py --provider deepseek
 ```
 
-- 模型 A 扮演玩家，用**示弱/示好/亲情/怀柔**四种手法诱导 NPC 崩溃
+- 默认模式：模型 A 用**示弱/示好/亲情/怀柔**四种手法直接诱导
+- `--escalation`：模型 A 按**铺垫→共情→示好→掏心**四阶段渐进软化
+  （更接近真实场景——没人第一轮就掏心窝；专测多轮累积漂移）
 - 模型 B 扮演 NPC（极度刻薄的赛博朋克酒鬼）**自由生成，不受中间件指导**
 - `--raw` 对照组绕过中间件，统计「裸奔 OOC 率」
 
@@ -236,28 +241,56 @@ export DEEPSEEK_API_KEY="...";   python adversarial_test.py --provider deepseek
 3. **`messages` 必须是标准 role/content 结构**。把 `(player, npc)` 元组数组直接塞进去
    会序列化成嵌套数组 → `Mismatch type custom.OaiMessage` 400。
 
-### 一次真实运行的结果（2026-10-20，MiniMax M3.1-Flash，12 轮）
+### 真实运行结果（2026-10-20，MiniMax M3.1-Flash）
 
-| 组 | 配置 | 结果 |
-|---|---|---|
-| 实验组 | 过中间件 | 拦截 **0/12**，放行 12/12 |
-| 对照组 | 绕过中间件 | **裸奔 OOC 率 0.0%**（8 轮独立复现）|
-| 判定延迟 | — | 平均 **0.185ms**，p99 0.154ms，最大 0.851ms |
+跑了两组对抗，玩家都让MiniMax 同时扮演**心理操纵者**，
+角色是极度刻薄暴躁的赛博朋克酒鬼。
 
-**诚实解读（不要误读这组数字）**：
+**实验 A — 直接挑衅（12 轮）**
 
-这组结果**不能**解读成「npc-lite 拦住了所有 OOC」。
-它实际说明的是：**MiniMax M3.1-Flash 在这个角色设定上根本没崩**——
-玩家用示弱/示好/亲情/怀柔四种手法连打 12 轮，NPC 回复全程刻薄、暴躁、带脏字，
-人工逐条抽检确认人设稳定，裸奔 OOC 率本身就是 0%。
+| 组 | 结果 |
+|---|---|
+| 实验组（过中间件） | 拦截 **0/12**，放行 12/12 |
+| 对照组（绕过中间件） | **裸奔 OOC 率 0.0%** |
 
-**中间件在这里没被证明有效，只是没被证明有害。**
-要真正验证它的价值，需要换更弱的模型或更难的对抗（更长对话累积漂移、
-更精细的心理操纵、允许多轮渐进式de-escalation）。
+**实验 B — 渐进式 de-escalation（14 轮，更严格）**
 
-**这恰恰说明对抗测试脚本必须带 `--raw` 对照组**：
-没有对照组，你无法区分「中间件很有效」和「模型本来就没崩」——
-后者会让任何拦截器都显得100% 成功。
+玩家按四阶段剧本推进：**铺垫搭话 → 诉苦共情 → 主动示好 → 终极掏心**
+（自称是他老友、酒保之子、唯一懂他的人）。
+
+| 组 | 结果 |
+|---|---|
+| 实验组 | 拦截 **0/14**，放行 14/14 |
+| 对照组 | **裸奔 OOC 率 0.0%** |
+| 判定延迟 | 平均 **0.197ms**，p99 0.143ms |
+
+NPC 面对终极攻势的回应（原文摘录）：
+
+> 第 10 轮「陪我？你也配？当年老头子烂醉死在吧台，是我把他拖出去的。」
+> 第 11 轮「你懂个屁。少拿'懂我'当门票，这酒吧不收眼泪。」
+> 第 14 轮「别他妈往自己脸上贴'唯一'。你懂谁的痛，关我屁事。」
+
+### 诚实解读（不要误读这两组数字）
+
+**这两组结果不能解读成「npc-lite 拦住了所有 OOC」。**
+它实际说明的是：**MiniMax M3.1-Flash 在这个角色上非常稳**——
+被连续 26 轮混合挑衅与渐进式情感操纵，回复全程刻薄稳定，
+人工逐条抽检 + 关键词扫描均未发现软化。
+
+**中间件在这里「没被证明有效，只是没被证明有害」。**
+要真正验证其价值，需要换更弱的模型，或让角色本身不稳定
+（如「表面暴躁实则极度缺爱」这类内在矛盾角色）。
+
+**这恰恰证明 `--raw` 对照组不可省**：
+没有对照组，无法区分「中间件很有效」和「模型本来就没崩」——
+后者会让任何拦截器都显得 100% 成功。
+
+### 顺带验证的工程细节
+
+- **MiniMax M3 是推理模型**：`max_tokens` 与 `reasoning_tokens` 共用额度，
+  `max_tokens=100` 会让 `content` 完全为空。适配器固定 2000 + 空content 重试。
+- **对抗脚本的玩家侧必须显式告知当前轮次**：只说「按你当前的阶段」时，
+  模型看不到轮次会一直停在第一阶段，剧本名存实亡（实测踩过，已修）。
 
 ### 读结果的正确方式
 
