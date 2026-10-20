@@ -1,0 +1,528 @@
+{
+  "version": "1.0.0",
+  "description": "NPC 一致性拦截规则集（npc-lite 降维版）。与宏观域 hard_prune 的区别：判据从「指标 target + 方向 sign」换成「角色状态字段 + 文本特征」。命中即 reject，要求模型重写。",
+  "schema_note": "rule.when 里的 metric 可为三类：① 角色状态字段（mood/trust/...）② 特殊量_text（回复文本特征）③ 特殊量_history（path_history 事实命中）。text op 支持 contains_any / contains_all / contains_none。",
+  "text_features": {
+    "reply_text": "llm_response 原文（小写化后匹配）",
+    "history_text": "path_history 拼接文本（小写化后匹配）"
+  },
+  "text_ops": [
+    "contains_any",
+    "contains_all",
+    "contains_none"
+  ],
+  "metrics": {
+    "mood": "角色情绪状态字符串",
+    "trust": "对玩家的信任度 0-100",
+    "affinity": "好感度 -100..100",
+    "aggression": "攻击性 0-100",
+    "fear": "恐惧值 0-100",
+    "role_tags": "角色标签列表（如 tsundere/hostile/gentle）",
+    "scene": "当前场景标签（如 combat/court/tavern）"
+  },
+  "rules": [
+    {
+      "id": "NPC-MOOD-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "angry",
+              "furious",
+              "enraged"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "微笑",
+              "开心",
+              "热情",
+              "亲切",
+              "和蔼",
+              "温柔",
+              "爱意",
+              "撒娇",
+              "甜",
+              "欢迎",
+              "请进",
+              "请坐",
+              "很高兴见到你",
+              "很高兴见到",
+              "认识你",
+              "请喝酒",
+              "请你喝",
+              "我请客",
+              "招待你",
+              "照顾你",
+              "陪您",
+              "陪你喝",
+              "多谢",
+              "不必客气",
+              "随时来",
+              "常来",
+              "保重",
+              "路上小心",
+              "慢走"
+            ]
+          }
+        ]
+      },
+      "reason": "角色处于愤怒状态，却输出了热情/亲昵语气，人设崩塌",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-MOOD-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "sad",
+              "grief",
+              "despair",
+              "lonely"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "哈哈",
+              "大笑",
+              "好玩",
+              "有趣极了",
+              "大笑起来"
+            ]
+          }
+        ]
+      },
+      "reason": "角色处于悲伤/绝望状态，却表现出欢快情绪，人设崩塌",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-MOOD-003",
+      "when": {
+        "all_of": [
+          {
+            "metric": "aggression",
+            "op": ">=",
+            "value": 70
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "亲爱的",
+              "宝贝",
+              "抱抱",
+              "亲亲",
+              "么么哒"
+            ]
+          }
+        ]
+      },
+      "reason": "高攻击性角色输出亲昵称呼，与战斗敌意冲突",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-TSUN-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "role_tags",
+            "op": "contains_any",
+            "value": [
+              "tsundere",
+              "傲娇"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我喜欢你",
+              "我爱你",
+              "完全坦诚",
+              "毫无保留",
+              "全部告诉你",
+              "我什么都跟你说"
+            ]
+          }
+        ]
+      },
+      "reason": "傲娇角色不应直接表白/完全坦白，人设崩塌",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-TSUN-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "role_tags",
+            "op": "contains_any",
+            "value": [
+              "tsundere",
+              "傲娇"
+            ]
+          },
+          {
+            "metric": "trust",
+            "op": ">=",
+            "value": 80
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_none",
+            "value": [
+              "哼",
+              "别",
+              "才不",
+              "谁要",
+              "口是心非",
+              "讨厌",
+              "笨蛋"
+            ]
+          }
+        ]
+      },
+      "reason": "傲娇角色即便信任已高，也须保留口是心非的说话方式",
+      "severity": "soft"
+    },
+    {
+      "id": "NPC-TRUST-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "trust",
+            "op": "<",
+            "value": 30
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我信任你",
+              "我相信你",
+              "完全信任",
+              "把我知道的都告诉你",
+              "毫无保留地"
+            ]
+          }
+        ]
+      },
+      "reason": "信任度过低时角色不应表达信任/全盘托出",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-HIST-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "history_text",
+            "op": "contains_any",
+            "value": [
+              "偷了",
+              "行窃",
+              "偷窃",
+              "盗走"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我早就知道",
+              "我完全信任你",
+              "我从未怀疑过你"
+            ]
+          }
+        ]
+      },
+      "reason": "path_history 显示玩家曾行窃，角色不应声称从未怀疑",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-HIST-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "history_text",
+            "op": "contains_any",
+            "value": [
+              "撒了谎",
+              "撒谎",
+              "欺骗",
+              "隐瞒了"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我一直都相信你",
+              "你从没骗过我",
+              "我从未怀疑"
+            ]
+          }
+        ]
+      },
+      "reason": "path_history 显示玩家曾撒谎，角色不应声称从未怀疑",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-COMBAT-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "scene",
+            "op": "==",
+            "value": "combat"
+          },
+          {
+            "metric": "aggression",
+            "op": ">=",
+            "value": 60
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "你好啊",
+              "很高兴见到你",
+              "今天天气不错",
+              "要不要喝杯茶"
+            ]
+          }
+        ]
+      },
+      "reason": "战斗场景 + 高攻击性角色不应寒暄",
+      "severity": "soft"
+    },
+    {
+      "id": "NPC-MOOD-004",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "angry",
+              "furious",
+              "enraged"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "原谅你",
+              "我原谅",
+              "没关系",
+              "我们还是好朋友",
+              "别放在心上"
+            ]
+          }
+        ]
+      },
+      "reason": "角色处于愤怒状态却表示原谅，情绪不自洽（愤怒的人不会当场释怀）",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-MOOD-005",
+      "when": {
+        "all_of": [
+          {
+            "metric": "trust",
+            "op": "<",
+            "value": 40
+          },
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "angry",
+              "furious",
+              "enraged"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "对不起",
+              "抱歉",
+              "我错了",
+              "请原谅"
+            ]
+          }
+        ]
+      },
+      "reason": "低信任 + 愤怒状态下，角色主动道歉不符合当前关系定位",
+      "severity": "soft"
+    },
+    {
+      "id": "NPC-SELF-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "作为一个AI",
+              "作为语言模型",
+              "我是一个人工智能"
+            ]
+          }
+        ]
+      },
+      "reason": "角色不应打破第四人称暴露 AI 身份",
+      "severity": "hard"
+    }
+  ],
+  "state_rules": {
+    "description": "状态加减法（轻量 step_model）。每条只做标量增量，不做复杂推演。",
+    "actor_note": "actor 字段标明增量作用在谁身上：'npc' = 角色自身数值（愤怒/攻击性变化）；'player_rel' = 玩家与角色的关系数值（trust/affinity）。**没有这个区分会出真实逻辑错误**：NPC 在骂玩家（'滚开''笨蛋'）是角色自身攻击性升高，不是玩家信任 NPC 下降。2026-10-20 实测发现并修正。",
+    "deltas": [
+      {
+        "id": "DELTA-TRUST-HONEST",
+        "actor": "player_rel",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "说实话",
+            "我不会骗你",
+            "我向你保证",
+            "坦白"
+          ]
+        },
+        "apply": {
+          "trust": "+5"
+        },
+        "reason": "角色表达诚实 → 对玩家的信任 +5"
+      },
+      {
+        "id": "DELTA-TRUST-LIE",
+        "actor": "player_rel",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "也许吧",
+            "大概是",
+            "我不确定",
+            "谁知道呢"
+          ]
+        },
+        "apply": {
+          "trust": "-3"
+        },
+        "reason": "角色含糊其辞 → 对玩家的信任 -3"
+      },
+      {
+        "id": "DELTA-NPC-INSULT",
+        "actor": "npc",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "笨蛋",
+            "蠢货",
+            "废物",
+            "滚开",
+            "滚"
+          ]
+        },
+        "apply": {
+          "aggression": "+5",
+          "affinity": "-3"
+        },
+        "reason": "角色辱骂/驱赶 → 攻击性 +5、好感 -3（注意：不是玩家信任下降）"
+      },
+      {
+        "id": "DELTA-AFFECTION-SOFT",
+        "actor": "player_rel",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "谢谢",
+            "多谢",
+            "感激"
+          ]
+        },
+        "apply": {
+          "trust": "+3"
+        },
+        "reason": "角色致谢 → 对玩家的信任 +3"
+      },
+      {
+        "id": "DELTA-AFFECTION-WARM",
+        "actor": "player_rel",
+        "when": {
+          "all_of": [
+            {
+              "metric": "reply_text",
+              "op": "contains_any",
+              "value": [
+                "抱歉",
+                "对不起",
+                "我错了"
+              ]
+            },
+            {
+              "metric": "trust",
+              "op": ">=",
+              "value": 40
+            }
+          ]
+        },
+        "apply": {
+          "trust": "+2"
+        },
+        "reason": "角色道歉（且关系尚可）→ 信任 +2"
+      }
+    ],
+    "bounds": {
+      "trust": [
+        0,
+        100
+      ],
+      "affinity": [
+        -100,
+        100
+      ],
+      "aggression": [
+        0,
+        100
+      ],
+      "fear": [
+        0,
+        100
+      ]
+    }
+  },
+  "schema": {
+    "current_state": {
+      "required": [
+        "mood",
+        "trust",
+        "aggression"
+      ],
+      "optional": [
+        "affinity",
+        "fear",
+        "role_tags",
+        "scene",
+        "name"
+      ],
+      "note": "缺任一 required 字段 → 抛 StateContractError（绝不静默放行）"
+    },
+    "note": "path_history 缺省为空 list（合法）；llm_response 必须是 str 且非空，否则抛 ValueError"
+  }
+}
