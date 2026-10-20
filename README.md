@@ -6,8 +6,104 @@
 
 ```bash
 python demo.py --latency       # 完整闭环 + 延迟基准，无需任何 API
-python tests/test_npc_lite.py  # 46 项验收，机器判定
+python tests/test_npc_lite.py  # 56 项验收，机器判定
 ```
+
+---
+
+## ⚡ 30 秒快速上手（写给游戏策划）
+
+**你不需要会写代码。** 打开一个记事本，改一个文件，跑一条命令，你的 NPC 就活了。
+
+### 三步
+
+**第1步· 跑一个现成的看看（10 秒）**
+
+```bash
+python inject_role.py --preset tsundere --play
+```
+
+你会看到一个傲娇公主：冷着脸 →玩家真诚对待 → 好感涨满 → **自动破冰变害羞**。
+全程判定耗时 **0.06 毫秒**。
+
+**第 2 步 · 改成你自己的角色（3 分钟）**
+
+打开 `config/role_recipe.ini`，**只改这几行**：
+
+```ini
+[角色]
+名字 = 暴躁老哥# ← 你的角色名
+初始情绪 = angry                        # 初始情绪名
+
+[情绪]
+angry = 你好, 谢谢, 对不起, 大神, 好厉害   # ← 愤怒时绝对不能说的话
+
+[破冰]
+字段 = trust                # ← 靠什么涨
+阈值 = 80                             # ← 涨到多少破冰
+破冰后情绪 = respectful                 # ← 破冰后变成什么样
+```
+
+**第 3 步 · 看效果（10 秒）**
+
+```bash
+python inject_role.py --recipe config/role_recipe.ini --play
+```
+
+### 你在改的到底是什么
+
+不是提示词，是**角色行为的状态机**：
+
+```
+        初始情绪                数值跨过阈值              自动切换
+    ┌────────────┐          ┌────────────┐         ┌────────────┐
+    │  冷漠 cold  │ ───────▶ │ 数值 >= 80 │ ───────▶ │ 害羞 shy   │
+    │ 不许热情   │  好感累积 │            │  状态跃迁 │ 可以心动   │
+    └────────────┘          └────────────┘         └────────────┘
+         ↑ 规则写在 [情绪]        ↑ 规则写在 [破冰]      ↑ 规则写在 [情绪]
+```
+
+**关键区别**：纯提示词写「他谈到机甲时会很激动」，
+模型会在**不该激动**的场合也激动。状态机能精确到
+「第 11 轮、信任 80、mood 从 cold 变 shy」。
+
+### 已经内置两个可对比的例子
+
+| 角色 | 破冰靠什么 | 结果 |
+|---|---|---|
+| 傲娇公主 `role_recipe.ini` | 聊共同话题（琴棋书画）涨信任 | 冷漠 → 害羞 |
+| 暴躁老哥 `preset_grumpy.ini` | 露出真本事（引擎/改装）涨尊重 | 愤怒 → 敬服 |
+
+**机制完全一样，只是字段名和词表全换了。** 这就是这个引擎的价值：
+你换的是设定，不换的是引擎。
+
+### 常见问题
+
+**Q：改了没反应？**
+A：跑一下 `--play`，如果出现「⚠ 配方提醒」就按提示改。
+最常见的是「破冰字段没有规则会增加它」——就像游戏里加了经验值但没给经验怪。
+
+**Q：能接进我们的服务器吗？**
+A：能。
+
+```bash
+python inject_role.py --recipe 你的.ini --out config/my_npc.json
+```
+
+```python
+from npc_guard import check_npc_response
+result = check_npc_response(state, history, llm_reply, rules_path="config/my_npc.json")
+# → {"status": "reject", "reason": "为什么不行", "rewrite_hint": "怎么改"}
+```
+
+Unity / C# 用子进程桥接：
+
+```bash
+echo '{"state":{...},"reply":"..."}' | python npc_bridge.py
+```
+
+**Q：能不能不用配置文件，直接命令行建角色？**
+A：可以，但推荐用 INI——它能写注释，改的时候不会出错。
 
 ---
 
@@ -309,6 +405,7 @@ NPC 被逼得无法自然表达，那也是人设崩塌。必须同时人工事�
 
 ```bash
 python demo_mask.py --latency     # 机甲师破冰完整演示
+python inject_role.py --preset tsundere --play   # 策划视角：改 INI 造角色
 ```
 
 ```
@@ -407,7 +504,7 @@ python demo_mask.py --latency     # 机甲师破冰完整演示
 ## 十、验收结果（实测，非声称）
 
 ```
-通过 46 项，失败 0 项
+通过 56 项，失败 0 项
 ```
 
 | 验收项 | 标准 | 实测 |
