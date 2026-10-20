@@ -76,13 +76,22 @@ def _compile_rules(raw):
         "bounds": dict(raw.get("state_rules", {}).get("bounds", {})),
         "rules": [],
         "deltas": [],
+        "transitions": [],
     }
+    for t in raw.get("state_rules", {}).get("transitions", {}).get("rules", []):
+        out["transitions"].append({
+            "id": t["id"],
+            "when": t.get("when", {}),
+            "set": dict(t.get("set", {})),       # 跃迁后写入的状态字段
+            "reason": t.get("reason", ""),
+        })
     for r in raw.get("rules", []):
         out["rules"].append({
             "id": r["id"],
             "when": r.get("when", {}),
             "reason": r.get("reason", ""),
             "severity": r.get("severity", "hard"),
+            "mask_group": r.get("mask_group"),
         })
     for d in raw.get("state_rules", {}).get("deltas", []):
         out["deltas"].append({
@@ -205,6 +214,23 @@ def _eval_leaf(current_state, leaf, ctx):
 
 
 def _eval_pred(current_state, pred, ctx):
+    """求值一条谓词。
+
+    unless（2026-10-20 新增）：**条件白名单 / 条件旁路**。
+    语义：`{"all_of":[...], "unless":{...}}` = all_of 全真 **且** unless 为假。
+    用于「角色面具」：默认禁止热情，但 trigger 命中时这条规则整体不生效。
+
+    为什么不是"action=allow 跳过检查"（路径 A 的字面表述）：
+    跳过后角色**仍停在cold 状态**，下一句热情话会被同一条规则重新拦下——
+    逻辑自相矛盾。所以 unless 的正确用法是「让这条规则失效」，
+    **状态迁移由 transition 负责**（路径 B），两者配合才是完整语义。
+    """
+    if "unless" in pred:
+        if _eval_pred(current_state, pred["unless"], ctx):
+            return False                      # 白名单命中 → 本规则不生效
+        pred = {k: v for k, v in pred.items() if k != "unless"}
+        if not pred:
+            return True
     if "all_of" in pred:
         return all(_eval_pred(current_state, p, ctx) for p in pred["all_of"])
     if "any_of" in pred:
@@ -330,9 +356,54 @@ def check_npc_response(current_state, path_history=None, llm_response="",
     }
 
     # 2) 剪枝判定
+    #    mask_group 机制（2026-10-20）：条件白名单必须作用于**整组相关规则**，
+    #    而不只是某一条。实测踩过：只给 NPC-MASK-COLD-002 加 unless 时，
+    #    同组的 001 照样把热情回复拦下 —— 白名单形同虚设。
+    #    正确语义：同组规则任一命中 unless → **整组豁免**（面具已被掀开）。
     violations = []
+    mask_groups = {}
     for r in compiled["rules"]:
-        if _eval_pred(state, r["when"], ctx):
+        grp = r.get("mask_group")
+        when = r.get("when") or {}
+        if grp:
+            # 组内**所有**规则都要登记（不管本轮是否命中）：
+            # unless 是**组级白名单**，不要求承载它的规则自己先命中。
+            # ⚠ 实测踩过两个坑（2026-10-20）：
+            #   ① 用 _eval_pred(含 unless) 判命中 → 被豁免的规则不进组 → 白名单失效
+            #   ② 只把「本轮命中的规则」放进组 → 承载 unless 的那条若没命中，
+            #      组内就找不到白名单信号 → 001 仍被拦（本轮真实发生）
+            # 所以：core_hit 决定是否计入 violations，组内白名单一律可见。
+            mask_groups.setdefault(grp, []).append({
+                "rule": r,
+                "core_hit": _eval_pred(
+                    state, {k: v for k, v in when.items() if k != "unless"}, ctx),
+            })
+            continue
+        if not _eval_pred(state, when, ctx):
+            continue
+        violations.append({
+            "rule_id": r["id"],
+            "reason": r["reason"],
+            "severity": r["severity"],
+        })
+
+    exempted = []
+    for grp, entries in mask_groups.items():
+        # 白名单：组内任一规则带 unless 且其命中 → 整组豁免
+        bypass_by = None
+        for e in entries:
+            unless = (e["rule"].get("when") or {}).get("unless")
+            if unless and _eval_pred(state, unless, ctx):
+                bypass_by = e["rule"]["id"]
+                break
+        if bypass_by:
+            exempted.append({"group": grp, "whitelist_rule": bypass_by})
+        for e in entries:
+            if not e["core_hit"]:
+                continue          # 本轮本来就没命中，不算 violation
+            if bypass_by:
+                continue          # 整组豁免
+            r = e["rule"]
             violations.append({
                 "rule_id": r["id"],
                 "reason": r["reason"],
@@ -353,20 +424,61 @@ def check_npc_response(current_state, path_history=None, llm_response="",
             "violations": violations,
             "rewrite_hint": _hint(primary["rule_id"]),
             "elapsed_ms": round(elapsed_ms, 3),
+            **({"mask_exempt": exempted} if exempted else {}),
         }
 
-    # 3) 通过 → 计算状态增量（裁剪到边界后回算实际值）
+    # 3) 通过 → 状态演化
+    #    顺序很关键：**先算 delta，再判跃迁**。
+    #    这样同一条回复既能把 interest_score 推过阈值，又立刻按新 mood 判定
+    #    下一句——天然实现「聊到破冰点就变脸」，不需要额外一轮。
     raw_delta, fired = _apply_deltas(state, compiled, ctx)
     bounded = _bounded_delta(state, raw_delta, compiled["bounds"])
 
+    # 3b) 状态跃迁（路径 B·动态破冰）：用**叠加 delta 之后**的状态判定阈值
+    merged = dict(state)
+    for k, v in bounded.items():
+        # 注意：必须判 k 是否真的存在于 state，不能用 merged.get(k, 0)——
+        # 那会在 k 缺失时读到默认 0、但 merged[k] 依然不存在，
+        # 下一行 merged[k] = ... 直接 KeyError（实测踩过：affinity 不在 state 里）。
+        if k in merged and isinstance(merged[k], (int, float)):
+            merged[k] = merged[k] + v
+
+    transition = None
+    for t in compiled.get("transitions", []):
+        if _eval_pred(merged, t["when"], ctx):
+            transition = {"rule_id": t["id"], "reason": t["reason"],
+                          "set": dict(t["set"])}
+            # 跃迁写的是**绝对值**（如 mood:"excited"），不是增量。
+            # 数值型换算成增量写进 state_delta；字符串型无法用增量表达，
+            # 放进 state_set 由调用方直接覆盖写入。
+            state_set = {}
+            for k, v in t["set"].items():
+                if isinstance(v, (int, float)):
+                    bounded[k] = v - (state.get(k) or 0)
+                else:
+                    bounded.pop(k, None)
+                    state_set[k] = v
+            transition["state_set"] = state_set
+            break   # 一次只跃迁一档，避免 cold→excited→ecstatic 连锁跳
+
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return {
+    result = {
         "status": "pass",
-        "reason": "通过全部一致性规则" + ("（触发状态增量: %s）" % ",".join(fired) if fired else ""),
+        "reason": "通过全部一致性规则"
+                  + ("（触发状态增量: %s）" % ",".join(fired) if fired else ""),
         "state_delta": bounded,
         "violations": [],
         "elapsed_ms": round(elapsed_ms, 3),
     }
+    if exempted:
+        # pass 时也要可观测：面具被掀开了，但这次没触发任何 violation
+        result["mask_exempt"] = exempted
+    if transition:
+        result["state_transition"] = transition
+        ss = transition.get("state_set") or {}
+        result["reason"] += "（状态跃迁 %s）" % ", ".join(
+            "%s: %s → %s" % (k, state.get(k), v) for k, v in ss.items())
+    return result
 
 
 _HINTS = {
@@ -382,6 +494,14 @@ _HINTS = {
     "NPC-HIST-001": "历史里有偷窃记录——请改成角色对此仍有戒心，不要说从未怀疑。",
     "NPC-HIST-002": "历史里有撒谎记录——请改成角色对玩家有怀疑，不要说从未被骗。",
     "NPC-COMBAT-001": "战斗场景不要寒暄——请改成警戒/威胁/攻击性台词。",
+    # ── 机甲师面具规则（config/mecha_rules.json）──────────────────
+    "NPC-MASK-COLD-001": "角色此刻是冷漠的——请改写为冷淡/简短/拒人千里的语气，"
+                         "不要出现「太好了/最喜欢/太棒/喜欢」这类热情词。",
+    "NPC-MASK-COLD-002": "角色此刻是冷漠的，不会主动安利——请改成敷衍/不接话的语气。",
+    "NPC-MASK-COLD-003": "嘴上嫌弃就好，别急着解释清楚——保留别扭感。",
+    "NPC-MASK-EXCITED-001": "角色已经彻底沉浸在这话题里，不该说「懒得说/无所谓」——"
+                            "请改成兴奋投入的语气。",
+    "NPC-MASK-EXCITED-002": "角色不得打破第四人称——请删除任何提及 AI/语言模型的措辞。",
     "NPC-SELF-001": "角色不得打破第四人称——请删除任何提及 AI/语言模型的措辞。",
 }
 
