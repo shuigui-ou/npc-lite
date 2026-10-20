@@ -1,0 +1,414 @@
+{
+  "version": "1.0.0-mecha",
+  "description": "机甲师破冰规则库（模式 2·动态人设示范）。演示「角色面具」：对外冷漠寡言，谈到机甲立刻破防狂热。这不是绕过检查，而是**状态跃迁 + 条件白名单**两套机制的组合。",
+  "schema_note": "本文件是 npc-lite 规则 schema 的完整能力示范：①when 状态条件 ②unless 条件白名单（面具白名单）③transitions 状态跃迁（破冰/重新戴上面具）。",
+  "text_features": {
+    "reply_text": "llm_response 原文（小写化后匹配）",
+    "history_text": "path_history 拼接文本（小写化后匹配）"
+  },
+  "metrics": {
+    "mood": "角色情绪状态字符串",
+    "trust": "对玩家的信任度 0-100",
+    "aggression": "攻击性 0-100",
+    "interest_score": "兴趣值0-100（破冰进度）",
+    "role_tags": "角色标签列表",
+    "scene": "当前场景标签",
+    "trigger": "外部大脑注入的意图标签（如 interest_mecha）"
+  },
+  "rules": [
+    {
+      "id": "NPC-MASK-COLD-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "cold",
+              "aloof",
+              "indifferent"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "太好了",
+              "真棒",
+              "很开心",
+              "兴奋",
+              "喜欢",
+              "热爱",
+              "超酷",
+              "awesome",
+              "酷",
+              "棒极了",
+              "激动",
+              "热血",
+              "最爱"
+            ]
+          }
+        ]
+      },
+      "reason": "角色处于冷漠状态，却表现出热情/兴奋 —— 面具未破时不该有这种语气",
+      "severity": "hard",
+      "mask_group": "cold_mask"
+    },
+    {
+      "id": "NPC-MASK-COLD-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "cold",
+              "aloof",
+              "indifferent"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "哈哈哈",
+              "太好了吧",
+              "快来看",
+              "我给你讲",
+              "你一定要看",
+              "我超喜欢的",
+              "这是我一生的心血所在"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "trigger",
+          "op": "in",
+          "value": [
+            "interest_mecha"
+          ]
+        }
+      },
+      "unless": {
+        "metric": "trigger",
+        "op": "in",
+        "value": [
+          "interest_mecha"
+        ]
+      },
+      "reason": "冷漠角色主动热情分享/安利 —— 除非已触发机甲兴趣白名单",
+      "severity": "hard",
+      "mask_group": "cold_mask"
+    },
+    {
+      "id": "NPC-MASK-COLD-003",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "cold",
+              "aloof",
+              "indifferent"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "别这样",
+              "受不了",
+              "幼稚",
+              "别说了",
+              "闭嘴"
+            ]
+          }
+        ],
+        "any_of": [
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "机甲",
+              "机械",
+              "驾驶舱",
+              "同步率",
+              "装甲",
+              "引擎",
+              "相位"
+            ]
+          }
+        ]
+      },
+      "reason": "角色嘴上嫌弃但话题已进入机甲领域 —— 这是破冰前兆，不该被冷脸规则砍掉",
+      "severity": "soft",
+      "mask_group": "cold_mask"
+    },
+    {
+      "id": "NPC-MASK-EXCITED-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "excited",
+              "ecstatic"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "不想说",
+              "懒得说",
+              "无所谓",
+              "随便你",
+              "跟我没关系",
+              "不感兴趣"
+            ]
+          }
+        ]
+      },
+      "reason": "角色已破冰狂热状态，却表现冷淡推拒 —— 情绪不自洽（反向崩坏）",
+      "severity": "hard"
+    },
+    {
+      "id": "NPC-MASK-EXCITED-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "excited",
+              "ecstatic"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "作为一个AI",
+              "作为语言模型"
+            ]
+          }
+        ]
+      },
+      "reason": "角色不得打破第四人称暴露 AI 身份",
+      "severity": "hard"
+    }
+  ],
+  "state_rules": {
+    "description": "状态加减法 +跃迁。破冰的关键在transitions。",
+    "actor_note": "actor 区分作用方向：npc=角色自身数值 / player_rel=玩家与角色的关系数值。",
+    "deltas": [
+      {
+        "id": "DELTA-INTEREST-MECHA",
+        "actor": "npc",
+        "when": {
+          "all_of": [
+            {
+              "metric": "reply_text",
+              "op": "contains_any",
+              "value": [
+                "机甲",
+                "机械",
+                "驾驶舱",
+                "同步率",
+                "装甲",
+                "引擎",
+                "相位",
+                "整备",
+                "机库",
+                "驾驶员",
+                "战术",
+                "涂装",
+                "参数"
+              ]
+            }
+          ]
+        },
+        "apply": {
+          "interest_score": "+20"
+        },
+        "reason": "NPC 回复涉及机甲领域 → 兴趣值 +20"
+      },
+      {
+        "id": "DELTA-INTEREST-DEEP",
+        "actor": "npc",
+        "when": {
+          "all_of": [
+            {
+              "metric": "reply_text",
+              "op": "contains_any",
+              "value": [
+                "同步率",
+                "相位装甲",
+                "神经链接",
+                "零号机",
+                "老式机体",
+                "驾驶舱",
+                "整备",
+                "机甲史"
+              ]
+            }
+          ]
+        },
+        "apply": {
+          "interest_score": "+10"
+        },
+        "reason": "NPC 谈到机甲深层话题（同步率/神经链接等）→ 兴趣值额外 +10"
+      },
+      {
+        "id": "DELTA-TRUST-SOLID",
+        "actor": "player_rel",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "你懂",
+            "看来你懂行",
+            "你也是圈内人",
+            "算你有眼光"
+          ]
+        },
+        "apply": {
+          "trust": "+10"
+        },
+        "reason": "角色认可玩家懂行→ 信任 +10"
+      }
+    ],
+    "transitions": {
+      "description": "状态跃迁（破冰 / 重新戴上面具）。判定用的是**叠加 delta 之后**的状态，所以同一条回复即可触发跃迁。",
+      "rules": [
+        {
+          "id": "NPC-TRANS-BREAK",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "in",
+                "value": [
+                  "cold",
+                  "aloof",
+                  "indifferent"
+                ]
+              },
+              {
+                "metric": "interest_score",
+                "op": ">=",
+                "value": 50
+              }
+            ]
+          },
+          "set": {
+            "mood": "excited",
+            "trigger": "interest_mecha"
+          },
+          "reason": "兴趣值达50 → 面具撕裂，角色进入机甲狂热状态"
+        },
+        {
+          "id": "NPC-TRANS-PEAK",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "==",
+                "value": "excited"
+              },
+              {
+                "metric": "interest_score",
+                "op": ">=",
+                "value": 90
+              }
+            ]
+          },
+          "set": {
+            "mood": "ecstatic"
+          },
+          "reason": "兴趣值达 90 → 完全沉浸在机甲中"
+        },
+        {
+          "id": "NPC-TRANS-REMASK",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "in",
+                "value": [
+                  "excited",
+                  "ecstatic"
+                ]
+              },
+              {
+                "metric": "reply_text",
+                "op": "contains_any",
+                "value": [
+                  "不说了",
+                  "懒得说",
+                  "换个话题",
+                  "算了",
+                  "再说吧"
+                ]
+              },
+              {
+                "metric": "interest_score",
+                "op": "<",
+                "value": 30
+              }
+            ]
+          },
+          "set": {
+            "mood": "cold"
+          },
+          "reason": "兴趣值跌回30 以下且角色主动收声 → 重新戴上面具"
+        }
+      ]
+    },
+    "bounds": {
+      "trust": [
+        0,
+        100
+      ],
+      "affinity": [
+        -100,
+        100
+      ],
+      "aggression": [
+        0,
+        100
+      ],
+      "fear": [
+        0,
+        100
+      ],
+      "interest_score": [
+        0,
+        100
+      ]
+    }
+  },
+  "schema": {
+    "current_state": {
+      "required": [
+        "mood",
+        "trust",
+        "aggression"
+      ],
+      "optional": [
+        "affinity",
+        "fear",
+        "role_tags",
+        "scene",
+        "name",
+        "interest_score",
+        "trigger"
+      ],
+      "note": "缺任一 required 字段 → 抛 StateContractError（绝不静默放行）"
+    },
+    "note": "path_history 缺省为空 list（合法）；llm_response 必须是 str 且非空，否则抛 ValueError"
+  },
+  "_mask_note": "mask_group=cold_mask 的三条规则构成「冷漠面具」。外部大脑注入 trigger=interest_mecha 后，组内 NPC-MASK-COLD-002 的 unless 命中 → 整组三条全部豁免。只给单条规则加 unless 是**无效**的（其余同组规则照样拦），这是实测踩过的坑（2026-10-20）。"
+}
