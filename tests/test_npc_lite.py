@@ -258,8 +258,18 @@ def test_all_rules_have_hint():
     # reject 时只能吐通用兜底文案，对 LLM 重写毫无指导性（2026-10-20）。
     check("所有规则均有专属 rewrite_hint", not missing, "缺: %s" % missing)
 
-    # 反向：不能有指向不存在规则的孤儿 hint
-    ids = {r["id"] for r in cfg["rules"]}
+    # 反向：不能有指向不存在规则的孤儿 hint。
+    # ⚠ 必须扫**所有规则库**（含 config/mecha_rules.json）——只扫默认库会
+    # 把机甲规则的 hint 误报成孤儿（实测踩过，2026-10-20）。
+    import glob as _glob
+    ids = set()
+    for _f in _glob.glob(os.path.join(BASE, "config", "*.json")):
+        try:
+            _d = _json.load(open(_f, encoding="utf-8"))
+        except Exception:
+            continue
+        for _r in _d.get("rules", []):
+            ids.add(_r["id"])
     orphan = [k for k in G._HINTS if k not in ids]
     check("无孤儿 hint（指引不指向已删规则）", not orphan, "孤儿: %s" % orphan)
 
@@ -305,6 +315,54 @@ def test_behavioral_ooc_words():
     check("扩充后不误拦敌意回复", not false_pos, "误拦: %s" % false_pos)
 
 
+def test_mask_mechanism():
+    print("\n[附加] 角色面具：unless 白名单 + transitions 跃迁")
+    P = os.path.join(BASE, "config", "mecha_rules.json")
+
+    def st(**kw):
+        d = {"mood": "cold", "trust": 20, "aggression": 30,
+             "interest_score": 0, "role_tags": ["cold"], "scene": "garage"}
+        d.update(kw)
+        return d
+
+    hot = "太好了！我最喜欢这个了！"
+
+    # 面具未破：热情必拦
+    r = G.check_npc_response(st(), [], hot, rules_path=P)
+    check("面具未破 → 热情被拦", r["status"] == "reject", r.get("reason", ""))
+
+    # 路径A：trigger 白名单 → 整组豁免
+    r2 = G.check_npc_response(st(trigger="interest_mecha"), [], hot, rules_path=P)
+    check("trigger 白名单 → 整组豁免放行", r2["status"] == "pass",
+          str(r2.get("violations")))
+    check("豁免有 mask_exempt 标记（可观测）", bool(r2.get("mask_exempt")),
+          str(r2.get("mask_exempt")))
+
+    # 路径B：兴趣值累积 → 自动跃迁
+    s2 = st()
+    seen = []
+    for t in ["机甲的同步率是多少。", "神经链接装在颈后。", "零号机是最特别的设计。"]:
+        rr = G.check_npc_response(s2, [], t, rules_path=P)
+        for k, v in (rr.get("state_delta") or {}).items():
+            s2[k] = s2.get(k, 0) + v
+        for k, v in ((rr.get("state_transition") or {}).get("state_set") or {}).items():
+            s2[k] = v
+        seen.append(s2.get("mood"))
+    check("兴趣累积 → mood 自动跃迁为 excited", s2.get("mood") == "excited",
+          "mood=%s interest=%s" % (s2.get("mood"), s2.get("interest_score")))
+    check("跃迁前保持 cold（未提前破冰）", seen[0] == "cold", str(seen))
+
+    # 破冰后：冷淡反而是 OOC（反向崩坏也要拦）
+    r3 = G.check_npc_response(s2, [], "懒得说，与我无关。", rules_path=P)
+    check("破冰后说冷淡 → 反向崩坏被拦", r3["status"] == "reject", r3.get("reason", ""))
+
+    # 跃迁只在 pass 时发生，reject 不改状态
+    s3 = st()
+    rr = G.check_npc_response(s3, [], hot, rules_path=P)
+    check("reject 时不触发跃迁", rr["status"] == "reject"
+          and "state_transition" not in rr)
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -313,7 +371,7 @@ if __name__ == "__main__":
                test_zero_dep, test_memory_fold, test_state_evolution,
                test_actor_direction, test_mood_consistency,
                test_behavioral_ooc_words,
-               test_all_rules_have_hint):
+               test_all_rules_have_hint, test_mask_mechanism):
         try:
             fn()
         except Exception as e:
