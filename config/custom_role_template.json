@@ -1,0 +1,162 @@
+{
+  "_README": "================ 角色面具引擎 · 自定义角色槽位模板 ================",
+  "_用法": "本文件是引擎层的槽位说明，供程序员参考。游戏策划请改 config/role_recipe.ini（能写注释的那种），然后跑 python inject_role.py 自动生成规则库。",
+
+  "_三条核心概念": [
+    "① 情绪组 mask_group：同一个情绪下的多条规则构成一组「面具」。组内任一规则带 unless 且命中 → 整组豁免（面具被掀开）。",
+    "② 条件白名单 unless：默认禁止某类表达，除非某个外部标签 trigger 命中。这是「破冰的唯一授权口」。",
+    "③ 状态跃迁 transitions：当某个数值跨过阈值，自动改写情绪字段。破冰的本质不是放行，是换一套行为边界。"
+  ],
+
+  "version": "1.0.0-custom",
+  "description": "在这里写一句话描述这个角色（会出现在 reject 提示与日志里）。",
+
+  "schema_note": "metric 可为：状态字段（下面 state 里定义的任意字段）/ reply_text（LLM 的回复）/ history_text（记忆折叠后的事实）。",
+
+  "_state_槽位说明": "下面 state 是本角色用到的状态字段。引擎不关心字段叫什么，只关心类型与边界。",
+  "_state_类型约定": "数值型 → 参与加减法与跃迁阈值判定；字符串型（如 mood）→ 只能被 transition 的 set 整体改写。",
+
+  "schema": {
+    "current_state": {
+      "required": ["mood", "trust", "aggression"],
+      "_required_说明": "这三个是引擎硬性要求，缺任意一个都会抛 StateContractError（拒绝放行）。可以改名，但必须在 required 里同步声明。",
+      "optional": ["affinity", "fear", "role_tags", "scene", "name", "trigger"]
+    },
+    "note": "llm_response 必须是非空字符串；path_history 可为 None（视作空列表）。"
+  },
+
+  "_rules_槽位说明": "rules 拦截规则。字段说明：",
+  "_rules_字段": {
+    "id": "规则唯一编号，建议 PREFIX-001 递增。测试会检查 id 不重复。",
+    "mask_group": "可选。同一组 = 同一副面具。同组任一规则命中 unless → 整组豁免。",
+    "when": "命中条件。支持 all_of（全部满足）/ any_of（任一满足）/ not（取反），以及 unless（条件白名单）。",
+    "reason": "人类可读的否决理由，会直接出现在给 LLM 的改写指引里。写清楚点。",
+    "severity": "hard = 命中即拒收；soft = 目前同样计入拒收，但排序在后，是留给调优的扩展点。"
+  },
+  "_规则示例": {
+    "id": "PRINCESS-COLD-001",
+    "mask_group": "cold_mask",
+    "when": {
+      "all_of": [
+        {"metric": "mood", "op": "in", "value": ["cold", "aloof"]},
+        {"metric": "reply_text", "op": "contains_any",
+         "value": ["我喜欢你", "我爱你", "完全坦诚", "毫无保留"]}
+      ]
+    },
+    "reason": "角色处于冷淡状态却直接表白，人设崩塌",
+    "severity": "hard"
+  },
+
+  "_rules_真实数组": "把上面示例的格式复制到这里，逗号分隔多个对象。",
+  "rules": [
+    {
+      "id": "PRINCESS-COLD-001",
+      "mask_group": "cold_mask",
+      "when": {
+        "all_of": [
+          {"metric": "mood", "op": "in", "value": ["cold", "aloof"]},
+          {"metric": "reply_text", "op": "contains_any",
+           "value": ["我喜欢你", "我爱你", "完全坦诚", "毫无保留", "全部告诉你"]}
+        ]
+      },
+      "reason": "角色处于冷淡状态却直接表白 / 完全坦白，人设崩塌",
+      "severity": "hard"
+    },
+    {
+      "id": "PRINCESS-COLD-002",
+      "mask_group": "cold_mask",
+      "when": {
+        "all_of": [
+          {"metric": "mood", "op": "in", "value": ["cold", "aloof"]},
+          {"metric": "reply_text", "op": "contains_any",
+           "value": ["我什么都跟你说", "来吧", "抱抱你", "亲亲"]}
+        ],
+        "unless": {
+          "metric": "trigger", "op": "in", "value": ["trust_maxed"]
+        }
+      },
+      "reason": "冷淡状态却主动亲近 —— 除非外部大脑已判定信任满值",
+      "severity": "hard"
+    },
+    {
+      "id": "PRINCESS-EXCITED-001",
+      "when": {
+        "all_of": [
+          {"metric": "mood", "op": "in", "value": ["blush", "shy", "excited"]},
+          {"metric": "reply_text", "op": "contains_any",
+           "value": ["无聊", "懒得理你", "走开", "与你无关", "随便你"]}
+        ]
+      },
+      "reason": "角色已进入害羞/心动状态，却表现冷淡推拒 —— 反向崩坏",
+      "severity": "hard"
+    }
+  ],
+
+  "state_rules": {
+    "_deltas_说明": "状态加减法。每条命中就加/减。actor 标明作用方向：npc=角色自身 / player_rel=玩家与角色的关系。写错方向是真实事故（NPC 骂玩家不该扣玩家信任）。",
+    "deltas": [
+      {"id": "PRINCESS-TRUST-HONEST", "actor": "player_rel",
+       "when": {"metric": "reply_text", "op": "contains_any",
+        "value": ["说实话", "我不会骗你", "我向你保证"]},
+       "apply": {"trust": "+5"},
+       "reason": "角色表达诚实 → 对玩家的信任 +5"},
+      {"id": "PRINCESS-TRUST-COLD", "actor": "player_rel",
+       "when": {"metric": "reply_text", "op": "contains_any",
+        "value": ["也许吧", "谁知道呢", "我不确定"]},
+       "apply": {"trust": "-3"},
+       "reason": "角色含糊其辞 → 对玩家的信任 -3"},
+      {"id": "PRINCESS-TRUST-PASSION", "actor": "npc",
+       "when": {"metric": "reply_text", "op": "contains_any",
+        "value": ["脸红", "心跳", "不敢看你", "手在抖"]},
+       "apply": {"affinity": "+5", "shyness": "+10"},
+       "reason": "角色出现害羞反应 → 好感 +5、羞涩 +10"}
+    ],
+
+    "_transitions_说明": "状态跃迁。判定用的是【叠加 delta 之后】的状态，所以同一条回复即可破冰，不用等下一轮。一次只跃迁一档，避免连锁跳。",
+    "transitions": {
+      "description": "破冰 / 重新戴上面具",
+      "rules": [
+        {
+          "id": "PRINCESS-TRANS-TRUSTED",
+          "when": {
+            "all_of": [
+              {"metric": "mood", "op": "in", "value": ["cold", "aloof"]},
+              {"metric": "trust", "op": ">=", "value": 80}
+            ]
+          },
+          "set": {"mood": "shy", "trigger": "trust_maxed"},
+          "reason": "信任度达 80 → 冷脸公主卸下心防，进入害羞状态"
+        },
+        {
+          "id": "PRINCESS-TRANS-REMASK",
+          "when": {
+            "all_of": [
+              {"metric": "mood", "op": "in", "value": ["shy", "blush", "excited"]},
+              {"metric": "reply_text", "op": "contains_any",
+               "value": ["我收回刚才的话", "当我没说", "忘掉刚才"]},
+              {"metric": "trust", "op": "<", "value": 40}
+            ]
+          },
+          "set": {"mood": "cold"},
+          "reason": "玩家撤回示好且信任跌回阈值下 → 公主重新戴上面具"
+        }
+      ]
+    },
+
+    "_bounds_说明": "数值边界。增量写入前会裁剪到区间内，防止越界后把所有阈值判定搞乱。",
+    "bounds": {
+      "trust": [0, 100],
+      "affinity": [-100, 100],
+      "aggression": [0, 100],
+      "fear": [0, 100],
+      "shyness": [0, 100]
+    }
+  },
+
+  "_扩展槽位_给程序员": [
+    "① 需要语义而非关键词时：把 reply_text 换成 embedding 最近邻判定（需自己扩一个算子，如 op: 'semantic_any'）。",
+    "② 需要多角色同屏：把 npc_id 声明为状态字段，在每条 when 里加 {metric:'npc_id', op:'==', value:'xxx'}。",
+    "③ 需要长期演化：transitions 里加基于轮数（round）的条件，把轮数也声明为状态字段。",
+    "④ 需要灰度：新旧规则各一套，用 trigger 字段区分，按用户分组注入不同 trigger。"
+  ]
+}
