@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 .env
-*.json.bak
+config/generated_role.json
+config/_t_*.json
