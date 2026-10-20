@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "description": "NPC 一致性拦截规则集（npc-lite 降维版）。与宏观域 hard_prune 的区别：判据从「指标 target + 方向 sign」换成「角色状态字段 + 文本特征」。命中即 reject，要求模型重写。",
-  "schema_note": "rule.when 里的 metric 可为三类：① 角色状态字段（mood/trust/...）② 特殊量_text（回复文本特征）③ 特殊量_history（path_history 事实命中）。text op 支持 contains_any / contains_all / contains_none。",
+  "schema_note": "rule.when 里的 metric 可为三类：① 角色状态字段（mood/trust/...）② 特殊量_text（回复文本特征）③ 特殊量_history（path_history 事实命中）。text op 支持 contains_any / contains_all / contains_none。 ②unless=条件白名单（trigger 命中则本规则不生效，用于「面具撕裂」）。 ③transition=状态跃迁（interest_score 达阈值时自动改 mood，用于破冰）。",
   "text_features": {
     "reply_text": "llm_response 原文（小写化后匹配）",
     "history_text": "path_history 拼接文本（小写化后匹配）"
@@ -540,6 +540,10 @@
         0,
         100
       ]
+    },
+    "transitions": {
+      "description": "状态跃迁（路径 B·动态破冰）。delta 先算出来，跃迁后读——这样同一条回复既能把 interest_score 推过阈值，又立刻按新mood 判定下一句，天然实现「聊到破冰点就变脸」。",
+      "rules": []
     }
   },
   "schema": {
