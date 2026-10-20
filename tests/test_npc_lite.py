@@ -426,6 +426,31 @@ def test_role_injection():
         os.remove(out)
 
 
+def test_stateless_isolation():
+    print("\n[附加] 无状态隔离：1000 个独立玩家状态互不干扰")
+    # 这是「可与任意状态引擎/记忆平台组合」的前提：
+    # 若引擎内部偷偷持有上一位玩家的状态，多玩家场景就会串人格。
+    P = os.path.join(BASE, "config", "mecha_rules.json")
+    hot = "太好了！我最喜欢这个了！"
+    wrong = 0
+    for i in range(1000):
+        st = {"mood": "cold", "trust": 20, "aggression": 30,
+              "interest_score": i % 40, "trigger": None, "role_tags": ["cold"]}
+        r = G.check_npc_response(st, [], hot, rules_path=P)
+        if r["status"] != "reject":
+            wrong += 1
+    check("1000 份独立状态交叉处理零串扰", wrong == 0, "异常 %d 次" % wrong)
+
+    # 顺序颠倒也要成立：同一玩家连续调用不该累积任何隐藏状态
+    a = {"mood": "cold", "trust": 20, "aggression": 30,
+         "interest_score": 0, "trigger": None, "role_tags": ["cold"]}
+    r1 = G.check_npc_response(a, [], hot, rules_path=P)
+    r2 = G.check_npc_response(a, [], hot, rules_path=P)
+    check("同一输入两次判定结果一致（无隐藏累积）",
+          r1["status"] == r2["status"] and r1["state_delta"] == r2["state_delta"],
+          "%s vs %s" % (r1["status"], r2["status"]))
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -435,6 +460,7 @@ if __name__ == "__main__":
                test_actor_direction, test_mood_consistency,
                test_behavioral_ooc_words,
                test_all_rules_have_hint, test_mask_mechanism,
+               test_stateless_isolation,
                test_role_injection):
         try:
             fn()
