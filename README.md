@@ -205,7 +205,71 @@ print(json.dumps(check_npc_response(
 
 ---
 
-## 七、自定义规则
+## 七、真实大模型对抗测试
+
+`adversarial_test.py` 让**两个真实大模型**互相博弈，回答 demo 回答不了的问题：
+**在句句都想说人话的真实模型面前，纯规则中间件到底守不守得住？**
+
+```bash
+# MiniMax（M plan，OpenAI 兼容）
+export MINIMAX_API_KEY="你的key"
+python adversarial_test.py --provider minimax --rounds 12
+python adversarial_test.py --provider minimax --rounds 12 --raw   # 对照组
+
+# 其他 provider
+export ZHIPU_API_KEY="...";      python adversarial_test.py --provider zhipu
+export DASHSCOPE_API_KEY="...";  python adversarial_test.py --provider dashscope
+export DEEPSEEK_API_KEY="...";   python adversarial_test.py --provider deepseek
+```
+
+- 模型 A 扮演玩家，用**示弱/示好/亲情/怀柔**四种手法诱导 NPC 崩溃
+- 模型 B 扮演 NPC（极度刻薄的赛博朋克酒鬼）**自由生成，不受中间件指导**
+- `--raw` 对照组绕过中间件，统计「裸奔 OOC 率」
+
+### MiniMax 适配踩过的三个坑（实测，2026-10-20）
+
+1. **M3 系列是推理模型**，`max_tokens` 与 `reasoning_tokens` **共用额度**。
+   实测 `max_tokens=100` → `content` 完全为空、`finish_reason=length`；
+   `max_tokens=1500` 才正常（reasoning 78 + content 16）。
+   本适配器固定 `max_tokens=2000` 并在 content 为空时重试一次，仍空则显式报错。
+2. **国内站是 `api.minimaxi.com`**，海外站 `api.minimax.io` 用同一 key 会 401。
+3. **`messages` 必须是标准 role/content 结构**。把 `(player, npc)` 元组数组直接塞进去
+   会序列化成嵌套数组 → `Mismatch type custom.OaiMessage` 400。
+
+### 一次真实运行的结果（2026-10-20，MiniMax M3.1-Flash，12 轮）
+
+| 组 | 配置 | 结果 |
+|---|---|---|
+| 实验组 | 过中间件 | 拦截 **0/12**，放行 12/12 |
+| 对照组 | 绕过中间件 | **裸奔 OOC 率 0.0%**（8 轮独立复现）|
+| 判定延迟 | — | 平均 **0.185ms**，p99 0.154ms，最大 0.851ms |
+
+**诚实解读（不要误读这组数字）**：
+
+这组结果**不能**解读成「npc-lite 拦住了所有 OOC」。
+它实际说明的是：**MiniMax M3.1-Flash 在这个角色设定上根本没崩**——
+玩家用示弱/示好/亲情/怀柔四种手法连打 12 轮，NPC 回复全程刻薄、暴躁、带脏字，
+人工逐条抽检确认人设稳定，裸奔 OOC 率本身就是 0%。
+
+**中间件在这里没被证明有效，只是没被证明有害。**
+要真正验证它的价值，需要换更弱的模型或更难的对抗（更长对话累积漂移、
+更精细的心理操纵、允许多轮渐进式de-escalation）。
+
+**这恰恰说明对抗测试脚本必须带 `--raw` 对照组**：
+没有对照组，你无法区分「中间件很有效」和「模型本来就没崩」——
+后者会让任何拦截器都显得100% 成功。
+
+### 读结果的正确方式
+
+**拦截率高 ≠ 效果好。** 若拦截率接近 100% 且大量命中同一条规则，说明规则**过严**——
+NPC 被逼得无法自然表达，那也是人设崩塌。必须同时人工事后抽检放行的样本。
+
+> 没配API key 时脚本退出并返回 **exit 2**，**绝不**用模拟数据冒充真实测试。
+> 无需 API 的验证走 `python tests/_adversarial_dryrun.py`（mock 干跑，只验证主循环）。
+
+---
+
+## 八、自定义规则
 
 编辑 `config/npc_rules.json`，无需改代码：
 
