@@ -363,6 +363,69 @@ def test_mask_mechanism():
           and "state_transition" not in rr)
 
 
+def test_role_injection():
+    print("\n[附加] 角色注入：策划改 INI → 编译 → 引擎生效")
+    import importlib
+    inj = importlib.import_module("inject_role")
+    import configparser
+
+    # 两个内置预设都必须能编译且跑出破冰
+    for preset in ("config/role_recipe.ini", "config/preset_grumpy.ini"):
+        path = os.path.join(BASE, preset)
+        name = os.path.basename(preset)
+        cp = configparser.ConfigParser(inline_comment_prefixes=("#",))
+        cp.optionxform = str
+        try:
+            cp.read(path, encoding="utf-8")
+        except Exception as e:
+            check("%s 可解析" % name, False, str(e))
+            continue
+        check("%s 可解析" % name, True)
+
+        out = os.path.join(BASE, "config", "_t_%s.json" % name.replace(".ini", ""))
+        lib, defaults, mood0, rname, warns = inj.compile_recipe(cp, out)
+
+        # 生成物必须是引擎能吃的结构
+        check("%s 生成合法规则" % name,
+              bool(lib.get("rules")) and bool(lib.get("state_rules")),
+              "rules=%d" % len(lib.get("rules", [])))
+
+        # 关键不变量：**每条情绪规则的 mood 条件只能是它自己那一组**。
+        # 编译器初版写成 moods 全集，导致情绪组互相污染——角色一破冰
+        # 就会被旧规则立刻拦回去（实测踩过，语义完全反了）。
+        mood_conds = {}
+        for r in lib["rules"]:
+            for leaf in r["when"].get("all_of", []):
+                if leaf.get("metric") == "mood" and leaf.get("op") == "in":
+                    mood_conds[r["id"]] = tuple(leaf["value"])
+        polluted = []
+        cp_moods = cp["情绪"] if cp.has_section("情绪") else {}
+        all_moods = set()
+        for k in cp_moods:
+            all_moods.update(k.split())
+        for rid, conds in mood_conds.items():
+            grp = str(rid).upper()
+            expect = {m for m in all_moods if m.upper() in grp}
+            if expect and not set(conds) <= expect:
+                polluted.append("%s: %s ⊄ %s" % (rid, list(conds), sorted(expect)))
+        check("%s 情绪组无交叉污染" % name, not polluted, "; ".join(polluted[:3]))
+
+        # 破冰字段必须在 [数值] 里声明，否则判定永远为假
+        check("%s 无「破冰字段不存在」告警" % name,
+              not any("不在 [数值]" in w for w in warns), str(warns))
+
+        # 引擎实跑：加载生成的规则 → 能正常判定
+        try:
+            G.check_npc_response(
+                dict(defaults, mood=mood0), [], "测试一句话", rules_path=out)
+            ok = True
+        except Exception as e:
+            ok = False
+            print("       引擎加载失败: %s: %s" % (type(e).__name__, e))
+        check("%s 引擎可加载生成的规则" % name, ok)
+        os.remove(out)
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -371,7 +434,8 @@ if __name__ == "__main__":
                test_zero_dep, test_memory_fold, test_state_evolution,
                test_actor_direction, test_mood_consistency,
                test_behavioral_ooc_words,
-               test_all_rules_have_hint, test_mask_mechanism):
+               test_all_rules_have_hint, test_mask_mechanism,
+               test_role_injection):
         try:
             fn()
         except Exception as e:
