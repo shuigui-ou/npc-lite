@@ -148,6 +148,12 @@ def _get_metric(current_state, metric, ctx):
         return ctx["reply_text"]
     if metric == "history_text":
         return ctx["history_text"]
+    if metric == "player_text":
+        # 玩家这一轮说了什么。剧本杀/审讯类场景必须能判定「玩家是否出示了证物、
+        # 是否指出矛盾」—— 否则 NPC 的心理压力永远涨不起来（实测踩过：
+        # 剧本杀 demo 里压力曲线恒为 0，因为 delta 的触发词在玩家问句里，
+        # 而引擎只看 reply_text）。
+        return ctx.get("player_text") or ""
     return current_state.get(metric)
 
 
@@ -162,6 +168,20 @@ def _eval_leaf(current_state, leaf, ctx):
 
     if op in ("contains_any", "contains_all", "contains_none"):
         hay = _get_metric(current_state, metric, ctx)
+        # ⚠ 文本分支必须只处理 **str**；list/tuple/set 字段（证物清单、
+        #   role_tags、已收集线索等）要走下面的成员判断分支。
+        #   实测踩过（2026-10-21）：这里原本对非 str 直接 return False，
+        #   导致下方 `if isinstance(val, (list,tuple,set))` 里的 contains_any
+        #   成员判断**永远执行不到** —— 剧本杀「证物清单」类机制会全盘失效
+        #   （evidence=['凶器照片'] 查 contains_any 恒为 False）。
+        if isinstance(hay, (list, tuple, set)):
+            tset = {str(x).lower() for x in (target or [])}
+            vset = {str(x).lower() for x in hay}
+            if op == "contains_any":
+                return bool(tset & vset)
+            if op == "contains_all":
+                return tset.issubset(vset)
+            return not bool(tset & vset)      # contains_none
         if not isinstance(hay, str):
             return False
         needles = [str(x).lower() for x in (target or [])]
@@ -325,13 +345,15 @@ def fold_memory(dialogue, max_facts=12):
 
 # ── 主API ──────────────────────────────────────────────────
 def check_npc_response(current_state, path_history=None, llm_response="",
-                       rules_path=None):
+                       player_input="", rules_path=None):
     """NPC 一致性单点判定。
 
     参数
       current_state : dict  角色当前状态（必填；缺 required 字段抛 StateContractError）
       path_history  : list  过去的关键事实（可为空 list）
       llm_response  : str   大模型生成的候选回复（非空 str）
+      player_input  : str   玩家这一轮说的话（可选；剧本杀/审讯类场景必需，
+                             供player_text 量词使用）
       rules_path    : str   可选，自定义规则库路径
 
     返回
@@ -353,6 +375,7 @@ def check_npc_response(current_state, path_history=None, llm_response="",
         "reply_text": text.lower(),
         "history_text": " ".join(history).lower(),
         "history": history,
+        "player_text": (player_input or "").lower(),
     }
 
     # 2) 剪枝判定
