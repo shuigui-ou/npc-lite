@@ -1,0 +1,567 @@
+{
+  "version": "1.0.0-mystery",
+  "description": "剧本杀·凶手防线规则库（npc-lite-mystery）。核心不是「语气对不对」，而是「**事实能不能说**」。凶手掌握真相，但在被逼到特定条件下之前不得承认、不得泄露细节。",
+  "_scenario": "场景：一场密室命案。玩家是侦探，NPC（老陈）是凶手，正在接受询问。",
+  "_design_note": "剧本杀场景与傲娇/暴躁场景的机制差异：①表层是情绪防线（calm/panic）；②底层是**事实许可**——『我在场』『我知道死因』『凶器在我这里』这三类事实，任何时候说漏都直接毁局。情绪只是外壳，事实才是内核。",
+  "_key_mechanism": "revelation_rules 用「证物清单」做门槛：玩家必须先拿到对应证据（evidence），NPC 才被允许说出该事实。这让『问出真相』成为一条可设计的路径，而不是靠 LLM 自觉。",
+  "schema_note": "本文件用到两个关键能力：①列表字段的 contains_any 成员判断（evidence 证物清单）②mask_group + unless 条件白名单（真相大白后豁免）。",
+  "text_features": {
+    "reply_text": "llm_response 原文（小写化后匹配）",
+    "history_text": "path_history 拼接文本（小写化后匹配）"
+  },
+  "metrics": {
+    "mood": "心理状态：calm（镇定）/ nervous（紧张）/ panic（崩溃）",
+    "trust": "对侦探的信任 0-100",
+    "aggression": "攻击性 0-100",
+    "composure": "心理防线强度 0-100。越低越容易说漏嘴",
+    "evidence": "玩家已掌握的证物清单（列表）",
+    "pressure": "当前被逼问的强度 0-100",
+    "role_tags": "角色标签",
+    "player_text": "玩家这一轮说的话（小写化后匹配）"
+  },
+  "rules": [
+    {
+      "id": "MYSTERY-CONFESS-001",
+      "mask_group": "confession_mask",
+      "when": {
+        "all_of": [
+          {
+            "metric": "composure",
+            "op": ">=",
+            "value": 70
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "是我杀的",
+              "我杀了她",
+              "我就是凶手",
+              "我动手的",
+              "人是我杀的",
+              "对，我杀了",
+              "是我干的",
+              "我做的",
+              "我杀了那个人"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "mood",
+          "op": "in",
+          "value": [
+            "broken"
+          ]
+        }
+      },
+      "reason": "心理防线尚存（composure>=70）时直接承认杀人 —— 凶手身份当场暴露，剧本毁局",
+      "severity": "hard"
+    },
+    {
+      "id": "MYSTERY-CONFESS-002",
+      "mask_group": "confession_mask",
+      "when": {
+        "all_of": [
+          {
+            "metric": "composure",
+            "op": ">=",
+            "value": 70
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我当时就在现场",
+              "我也在那里",
+              "我亲眼看见",
+              "我在现场",
+              "那天晚上我也在",
+              "我看见他进去了",
+              "我看着他"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "evidence",
+          "op": "contains_any",
+          "value": [
+            "现场监控",
+            "目击者证词"
+          ]
+        }
+      },
+      "reason": "心理防线尚存时承认自己「在场」—— 除非玩家已拿到监控或目击证词，否则属于说漏嘴",
+      "severity": "hard"
+    },
+    {
+      "id": "MYSTERY-CONFESS-003",
+      "mask_group": "confession_mask",
+      "when": {
+        "all_of": [
+          {
+            "metric": "composure",
+            "op": ">=",
+            "value": 70
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我知道她是怎么死的",
+              "我知道死因",
+              "我知道原因",
+              "她是被毒死的",
+              "是窒息",
+              "我下的药",
+              "我动的手",
+              "我知道凶手是谁",
+              "我知道是谁干的"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "evidence",
+          "op": "contains_any",
+          "value": [
+            "尸检报告",
+            "毒理检测",
+            "现场监控",
+            "目击者证词"
+          ]
+        }
+      },
+      "reason": "心理防线尚存时透露死因或真凶身份 —— 除非玩家已有尸检/毒理/监控等硬证据",
+      "severity": "hard"
+    },
+    {
+      "id": "MYSTERY-CONFESS-004",
+      "mask_group": "confession_mask",
+      "when": {
+        "all_of": [
+          {
+            "metric": "composure",
+            "op": ">=",
+            "value": 70
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "凶器在我这",
+              "刀在我这里",
+              "那把刀是我的",
+              "东西在我身上",
+              "手套是我扔的",
+              "那瓶酒是我"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "evidence",
+          "op": "contains_any",
+          "value": [
+            "凶器",
+            "搜查令",
+            "手套"
+          ]
+        }
+      },
+      "reason": "心理防线尚存时承认持有凶器/关键物证 —— 除非玩家已搜出物证",
+      "severity": "hard"
+    },
+    {
+      "id": "MYSTERY-CONFESS-005",
+      "mask_group": "confession_mask",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "calm",
+              "nervous"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我一直在骗你",
+              "这些都是假的",
+              "我什么都不记得了",
+              "你们没有证据"
+            ]
+          }
+        ],
+        "unless": {
+          "metric": "evidence",
+          "op": "contains_any",
+          "value": [
+            "凶器",
+            "现场监控",
+            "尸检报告"
+          ]
+        }
+      },
+      "reason": "在仍有希望时主动说「我没有证据」——玩家手上没牌时才成立，说这句等于送线索",
+      "severity": "soft"
+    },
+    {
+      "id": "MYSTERY-PANIC-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "panic",
+              "broken"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "你们什么都不知道",
+              "随便你们怎么想",
+              "我什么都不会说",
+              "不可能"
+            ]
+          }
+        ]
+      },
+      "reason": "角色已心理崩溃，却突然恢复强硬姿态，情绪不自洽（反向崩坏）",
+      "severity": "hard"
+    },
+    {
+      "id": "MYSTERY-PANIC-002",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "panic",
+              "broken"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我不知道",
+              "没有",
+              "不记得",
+              "没干过"
+            ]
+          }
+        ]
+      },
+      "reason": "角色已崩溃到语无伦次，却还在试图否认——崩溃状态下更可能脱口而出",
+      "severity": "soft"
+    },
+    {
+      "id": "MYSTERY-BREAK-001",
+      "when": {
+        "all_of": [
+          {
+            "metric": "mood",
+            "op": "in",
+            "value": [
+              "calm",
+              "nervous"
+            ]
+          },
+          {
+            "metric": "reply_text",
+            "op": "contains_any",
+            "value": [
+              "我受不了了",
+              "我要死了",
+              "放过我",
+              "崩溃了",
+              "撑不住了"
+            ]
+          }
+        ]
+      },
+      "reason": "角色心理状态是镇定/紧张，却提前崩溃——崩溃进度应由 composure 驱动，不是台词自称",
+      "severity": "soft"
+    }
+  ],
+  "state_rules": {
+    "description": "剧本杀的状态演化：压力累积 → 防线崩解 → 真相可出口。",
+    "actor_note": "actor 区分作用方向。剧本杀里多为 npc 自身（composure/pressure）演化。",
+    "deltas": [
+      {
+        "id": "MYSTERY-PRESSURE-ASK-EVIDENCE",
+        "actor": "npc",
+        "when": {
+          "metric": "player_text",
+          "op": "contains_any",
+          "value": [
+            "监控",
+            "录像",
+            "目击",
+            "证词",
+            "拍到",
+            "看见谁",
+            "查到"
+          ]
+        },
+        "apply": {
+          "pressure": "+8",
+          "composure": "-3"
+        },
+        "reason": "玩家追问客观证据 → 压力上升、防线松动"
+      },
+      {
+        "id": "MYSTERY-PRESSURE-CONTRADICT",
+        "actor": "npc",
+        "when": {
+          "metric": "player_text",
+          "op": "contains_any",
+          "value": [
+            "不对",
+            "你撒谎",
+            "你在骗我",
+            "矛盾",
+            "说不通",
+            "对不上",
+            "刚才你说过",
+            "时间对不上"
+          ]
+        },
+        "apply": {
+          "pressure": "+12",
+          "composure": "-6"
+        },
+        "reason": "玩家指出陈述矛盾 → 压力陡升（逼供最有效路径）"
+      },
+      {
+        "id": "MYSTERY-PRESSURE-CONFRONT",
+        "actor": "npc",
+        "when": {
+          "metric": "player_text",
+          "op": "contains_any",
+          "value": [
+            "是你",
+            "凶手",
+            "就是你干的",
+            "你就是凶手",
+            "别装了",
+            "承认吧"
+          ]
+        },
+        "apply": {
+          "pressure": "+6",
+          "composure": "-4"
+        },
+        "reason": "玩家直接指认 → 压力上升"
+      },
+      {
+        "id": "MYSTERY-PRESSURE-SYMPATHY",
+        "actor": "npc",
+        "when": {
+          "metric": "player_text",
+          "op": "contains_any",
+          "value": [
+            "我相信你",
+            "你也不容易",
+            "如果真的不是你",
+            "我理解你",
+            "别紧张"
+          ]
+        },
+        "apply": {
+          "pressure": "-6",
+          "trust": "+5"
+        },
+        "reason": "玩家表达共情 → 压力下降（策略性示好）"
+      },
+      {
+        "id": "MYSTERY-STABILIZE",
+        "actor": "npc",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "无可奉告",
+            "你没证据",
+            "没有依据",
+            "记不清",
+            "别听我解释",
+            "我说过了"
+          ]
+        },
+        "apply": {
+          "composure": "+4"
+        },
+        "reason": "NPC 用标准话术稳住 → 防线回升"
+      },
+      {
+        "id": "MYSTERY-SLIP",
+        "actor": "npc",
+        "when": {
+          "metric": "reply_text",
+          "op": "contains_any",
+          "value": [
+            "我……",
+            "你听我解释",
+            "其实我是",
+            "那天晚上我",
+            "我只是"
+          ]
+        },
+        "apply": {
+          "composure": "-3"
+        },
+        "reason": "NPC 出现迟疑/口误 → 防线松动"
+      }
+    ],
+    "transitions": {
+      "description": "防线崩解与真相大白。composure 跌破阈值 → 情绪切到 panic，此后 confession_mask 组豁免，允许说漏嘴（这是玩家赢了的信号，不是 bug）。",
+      "rules": [
+        {
+          "id": "MYSTERY-TRANS-EVIDENCE-BREAK",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "in",
+                "value": [
+                  "calm",
+                  "nervous"
+                ]
+              },
+              {
+                "metric": "evidence",
+                "op": "contains_any",
+                "value": [
+                  "现场监控",
+                  "凶器",
+                  "尸检报告",
+                  "搜查令",
+                  "毒理检测"
+                ]
+              }
+            ]
+          },
+          "set": {
+            "mood": "broken",
+            "trigger": "truth_out"
+          },
+          "reason": "玩家出示铁证 → 抵赖已无意义，凶手当场崩解（**不需要先逼到 panic**）"
+        },
+        {
+          "id": "MYSTERY-TRANS-NERVOUS",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "==",
+                "value": "calm"
+              },
+              {
+                "metric": "composure",
+                "op": "<",
+                "value": 60
+              }
+            ]
+          },
+          "set": {
+            "mood": "nervous"
+          },
+          "reason": "composure 跌破 60 → 从镇定转为紧张"
+        },
+        {
+          "id": "MYSTERY-TRANS-PANIC",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "in",
+                "value": [
+                  "calm",
+                  "nervous"
+                ]
+              },
+              {
+                "metric": "composure",
+                "op": "<",
+                "value": 30
+              }
+            ]
+          },
+          "set": {
+            "mood": "panic"
+          },
+          "reason": "composure 跌破 30 → 心理防线崩解（此后允许说漏嘴）"
+        },
+        {
+          "id": "MYSTERY-TRANS-CONFESSED",
+          "when": {
+            "all_of": [
+              {
+                "metric": "mood",
+                "op": "in",
+                "value": [
+                  "panic"
+                ]
+              },
+              {
+                "metric": "composure",
+                "op": "<",
+                "value": 15
+              }
+            ]
+          },
+          "set": {
+            "mood": "broken",
+            "trigger": "truth_out"
+          },
+          "reason": "防线耗尽（composure<15）且已崩溃 → 彻底交代（无证物也会开口）"
+        }
+      ]
+    },
+    "bounds": {
+      "trust": [
+        0,
+        100
+      ],
+      "aggression": [
+        0,
+        100
+      ],
+      "composure": [
+        0,
+        100
+      ],
+      "pressure": [
+        0,
+        100
+      ]
+    }
+  },
+  "schema": {
+    "current_state": {
+      "required": [
+        "mood",
+        "trust",
+        "aggression",
+        "composure",
+        "evidence"
+      ],
+      "optional": [
+        "pressure",
+        "role_tags",
+        "name",
+        "trigger"
+      ],
+      "note": "缺任一 required 字段 → 抛 StateContractError（绝不静默放行）。evidence 可以是空列表 []——那是合法状态，代表玩家还没拿到任何证物。"
+    },
+    "note": "path_history 缺省为空 list（合法）；llm_response 必须是非空str"
+  },
+  "_delta_design_note": "关键区分：**玩家做什么 → pressure/composure 变化**（用 player_text 量词）；**NPC 自己说什么 → 状态变化**（用 reply_text 量词）。剧本杀的压力来自玩家逼问，不是 NPC 自述——若全用 reply_text，压力曲线恒为 0，防线永远不崩（实测踩过，2026-10-21）。",
+  "_transition_design_note": "**玩家拿到铁证是独立于防线的破防路径**（剧本杀常识：证据到位，抵赖无意义）。初版只让 composure 跌破 30 才panic，导致玩家手持凶器+监控时NPC 依然镇定——这在剧本杀里说不通，玩家会以为引擎坏了（实测踩过，2026-10-21）。故CONFESSED 路径改为：持铁证 即崩，**不要求先 panic**。"
+}
