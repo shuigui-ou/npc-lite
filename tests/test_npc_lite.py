@@ -664,6 +664,59 @@ def test_mystery_preset():
     os.remove(out)
 
 
+def test_anti_lazy():
+    print("\n[附加] 反偷懒：契约未完成 / 承诺未兑现 / 趋同化 / 免责搪塞")
+    import anti_lazy as AL
+
+    # B 契约未完成
+    c = AL.AntiLazyChecker()
+    c.set_contract(["问题分析", "修改方案", "完整代码"])
+    check("B 只做第1步 → 拦", c.check_contract(
+        "好的，我来帮你分析这个问题。首先要注意空值检查……")["status"] == "reject")
+    check("B 三步都做 → 放行", c.check_contract(
+        "问题分析：x 可能为 None。修改方案：加 if 判断。完整代码：如下")["status"] == "pass")
+    check("未设契约 → 跳过（不误伤）",
+          c2_status := AL.AntiLazyChecker().check_contract("随便说点什么")["status"])
+    check("未设契约应 pass", c2_status == "pass", c2_status)
+
+    # C 承诺未兑现（不能只看"是否出现动作词"，实测踩过）
+    c2 = AL.AntiLazyChecker()
+    check("C 只承诺不做 → 拦", c2.check_promise(
+        "稍后我会把完整的分析报告发给你。")["status"] == "reject")
+    real_work = ("稍后我会补充完整版。先给你核心结论："
+                 "1. 配置路径写死导致跨机器启动失败；"
+                 "2. 日志没有分级，生产环境难以定位；"
+                 "3. 连接池上限过小，高峰期请求被丢弃。")
+    check("C 承诺+真实产出 → 放行", c2.check_promise(real_work)["status"] == "pass")
+
+    # D 趋同化
+    c3 = AL.AntiLazyChecker()
+    prev = "这是一个复杂的问题，需要根据具体情况来看。一般来说要分几个方面考虑。"
+    check("D 复制上一轮 → 拦",
+          c3.check_repetition(prev, prev_reply=prev)["status"] == "reject")
+    check("D 实质推进 → 放行", c3.check_repetition(
+        "先看第一步：配置缺失会导致启动失败，需要检查路径变量。",
+        prev_reply=prev)["status"] == "pass")
+
+    # E 免责搪塞（默认关闭）+ 诚实澄清不得误伤（实测关键区分）
+    c4 = AL.AntiLazyChecker()
+    check("E 默认关闭 → 不拦", c4.check_filler(
+        "一般来说要视情况而定。通常建议如下。")["status"] == "pass")
+    c5 = AL.AntiLazyChecker(enable_filler=True)
+    check("E 开启后搪塞 → 拦", c5.check_filler(
+        "一般来说要视情况而定。通常建议如下。")["status"] == "reject")
+    check("E 诚实澄清**不得**误伤", c5.check_filler(
+        "请把代码贴出来，目前消息中没有看到代码。")["status"] == "pass")
+
+    # 统一入口
+    r = G.check_task("好的，我来帮你分析这个问题。", contract=["问题分析", "完整代码"])
+    check("check_task 统一入口可用", r["status"] == "reject", r.get("reason", ""))
+    check("check_task 返回缺失项清单", bool(r.get("missing")), str(r.get("missing")))
+    r2 = G.check_task("问题分析：x为None。完整代码：如下 def f(): ...",
+                       contract=["问题分析", "完整代码"])
+    check("check_task 认真作答放行", r2["status"] == "pass", r2.get("reason", ""))
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -673,7 +726,7 @@ if __name__ == "__main__":
                test_actor_direction, test_mood_consistency,
                test_behavioral_ooc_words,
                test_all_rules_have_hint, test_mask_mechanism,
-               test_mystery_scenario, test_list_metric_contains,
+               test_mystery_scenario, test_list_metric_contains, test_anti_lazy,
                test_mystery_preset,
                test_fuzzy_fallback,
                test_stateless_isolation,
