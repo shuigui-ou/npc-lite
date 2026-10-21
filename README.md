@@ -6,7 +6,7 @@
 
 ```bash
 python demo.py --latency       # 完整闭环 + 延迟基准，无需任何 API
-python tests/test_npc_lite.py  # 82 项验收，机器判定
+python tests/test_npc_lite.py  # 97 项验收，机器判定
 ```
 
 ---
@@ -623,6 +623,63 @@ check_npc_response(state, history, npc_reply, player_input=玩家这轮说的话
 
 `evidence` 是一个 list，引擎做的是**集合交集**，不是子串匹配。
 
+### 多玩家场景下的状态切片
+
+剧本杀是多人本。**玩家 A 被逼问到防线崩了，不该连带把玩家 B 也压垮**——
+每个玩家有自己的怀疑路径、自己的证物清单。
+
+本引擎**完全无状态**：宿主把合成好的 state 传进来，用完就走。
+因此切片隔离是天然的，只要宿主按玩家 id 存 state 即可：
+
+```python
+states = {pid: {...} for pid in players}      # 每人一份完整切片
+
+# 玩家A 被逼问
+state = states["玩家A"]
+r = check_npc_response(state, history, reply, player_input=ask)
+for k, v in r["state_delta"].items():         # 只写回 A
+    state[k] = state.get(k, 0) + v
+
+# 玩家B 完全独立：mood 仍 calm，evidence 仍为空，仍可抵赖
+```
+
+demo 第三段实测：
+
+```
+▶ 只对玩家A 连续逼问
+  我们有走廊监控。          → A.composure 85 → 82
+  你刚才说的时间对不上。       → A.composure    → 76
+  你就是凶手，承认吧。        → A.composure    → 72
+  玩家A composure=72   玩家B composure=85  ← B 未被污染
+  ✅ 切片隔离成立
+
+▶ 玩家A 出示铁证
+  玩家A mood=broken（已崩，秘密豁免）  玩家B mood=calm  ← B 仍在抵赖
+  ✅ 破防也是按玩家切片的
+```
+
+**两条不变量已被测试钉住**（`test_mystery_preset` / `test_stateless_isolation`）：
+
+- 1000 份独立状态交叉处理**零串扰**
+- 破防只影响持有该证物的那个玩家
+
+#### 一个必须注意的契约
+
+切片必须是**完整**的。缺字段会被引擎抛 `StateContractError`——
+这是刻意的：状态不明时放行，等于让崩坏的台词流到玩家眼前。
+
+```python
+# 错误：只塞部分字段
+states["A"] = {"mood": "calm", "composure": 40}     # 缺 trust/evidence → 抛错
+
+# 正确：从模板深拷贝，列表字段要复制而非共享
+states = {pid: {k: (list(v) if isinstance(v, list) else v)
+                for k, v in TEMPLATE.items()} for pid in players}
+```
+
+⚠ **列表字段别忘了拷贝**。`evidence` 若用 `=` 浅拷贝，多个玩家会共享同一个 list——
+A 拿到监控，B 的清单里也会出现监控。这是多人本最容易踩的坑。
+
 ### 破防有两条独立路径
 
 | 路径 | 条件 | 含义 |
@@ -721,7 +778,7 @@ npc_guard.enable_fuzzy(ngram=True, semantic=m)
 ## 十二、验收结果（实测，非声称）
 
 ```
-通过 82 项，失败 0 项
+通过 97 项，失败 0 项
 ```
 
 | 验收项 | 标准 | 实测 |
