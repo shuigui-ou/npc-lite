@@ -451,6 +451,106 @@ def test_stateless_isolation():
           "%s vs %s" % (r1["status"], r2["status"]))
 
 
+def test_mystery_scenario():
+    print("\n[附加] 剧本杀：事实许可 + 玩家输入 + 铁证破防")
+    P = os.path.join(BASE, "config", "mystery_rules.json")
+
+    def st(**kw):
+        d = {"mood": "calm", "trust": 40, "aggression": 30,
+             "composure": 85, "pressure": 0, "evidence": [],
+             "role_tags": ["killer"]}
+        d.update(kw)
+        return d
+
+    # ① 防线尚存时承认在场 → 必拦（这是用户点名的核心场景）
+    r = G.check_npc_response(
+        st(), [], "我当时就在现场！我是去拿东西的！",
+        player_input="你昨晚十点在哪？", rules_path=P)
+    check("防线尚存 → 承认「在场」被拦", r["status"] == "reject", r.get("reason", ""))
+    check("拦截理由点名 fact泄漏而非语气",
+          r["status"] != "reject" or "在场" in r["reason"], r.get("reason", ""))
+
+    # ② 玩家持有监控 → 同样台词放行（除非白名单生效）
+    r2 = G.check_npc_response(
+        st(evidence=["现场监控"]), [], "我当时就在现场！",
+        player_input="这是走廊监控", rules_path=P)
+    check("玩家持监控 → 承认在场放行（unless 白名单）", r2["status"] == "pass",
+          str(r2.get("violations")))
+
+    # ③ 崩溃后承认不再算OOC（反向：不能一直拦着不让剧情推进）
+    r3 = G.check_npc_response(
+        st(mood="broken", composure=20, evidence=["凶器"]),
+        [], "是我杀的。我动手的。", player_input="凶器上有你的痕迹", rules_path=P)
+    check("角色已 broken → 承认是剧情推进，放行", r3["status"] == "pass",
+          str(r3.get("violations")))
+
+    # ④ player_text 必须真的参与判定（压力来源）
+    base = st()
+    cold = G.check_npc_response(base, [], "无可奉告。",
+                              player_input="我们有监控录像。", rules_path=P)
+    check("玩家出示监控 → pressure 上升（player_text 生效）",
+          (cold.get("state_delta") or {}).get("pressure", 0) > 0,
+          str(cold.get("state_delta")))
+    same = G.check_npc_response(base, [], "无可奉告。",
+                              player_input="今天天气不错。", rules_path=P)
+    check("无关问句 → 压力不涨（不误判）",
+          (same.get("state_delta") or {}).get("pressure", 0) == 0,
+          str(same.get("state_delta")))
+
+    # ⑤ 铁证破防：不要求先逼到 panic
+    s5 = st()
+    got = {}
+    for e in (["现场监控"], ):
+        r5 = G.check_npc_response(
+            s5, [], "好吧……我当时就在现场。",
+            player_input="这是走廊监控", rules_path=P)
+        for k, v in (r5.get("state_delta") or {}).items():
+            s5[k] = s5.get(k, 0) + v
+        for k, v in (r5.get("state_transition") or {}).get("state_set", {}).items():
+            s5[k] = v
+    s5["evidence"].append("现场监控")
+    r5b = G.check_npc_response(
+        s5, [], "……我看见他进去了。",
+        player_input="监控显示你在场", rules_path=P)
+    for k, v in (r5b.get("state_transition") or {}).get("state_set", {}).items():
+        s5[k] = v
+    check("玩家出示铁证 → 当场破防（无需先到 panic）",
+          s5.get("mood") == "broken", "mood=%s" % s5.get("mood"))
+
+    # ⑥ 证物清单必须是列表成员判断（引擎曾经恒返回 False）
+    ctx = {"reply_text": "x", "history_text": "", "history": [], "player_text": ""}
+    s6 = st(evidence=["血迹报告"])
+    check("证物清单 contains_any 成员判断生效",
+          G._eval_leaf(s6, {"metric": "evidence", "op": "contains_any",
+                            "value": ["血迹报告"]}, ctx) is True)
+    check("证物清单不含某物 → contains_any 为 False",
+          G._eval_leaf(s6, {"metric": "evidence", "op": "contains_any",
+                            "value": ["监控录像"]}, ctx) is False)
+
+
+def test_list_metric_contains():
+    print("\n[附加] 列表字段算子：引擎曾因文本分支前置而全盘失效")
+    st = {"evidence": ["凶器照片", "血迹报告"], "role_tags": ["killer"]}
+    ctx = {"reply_text": "x", "history_text": "", "history": [], "player_text": ""}
+    # 回归钉死：2026-10-21 修复前，列表走文本分支直接 return False，
+    # 下方 isinstance(list) 分支永远执行不到 —— 剧本杀证物机制会全盘失效。
+    check("list.contains_any 命中",
+          G._eval_leaf(st, {"metric": "evidence", "op": "contains_any",
+                            "value": ["血迹报告"]}, ctx) is True)
+    check("list.contains_all 全含",
+          G._eval_leaf(st, {"metric": "evidence", "op": "contains_all",
+                            "value": ["凶器照片", "血迹报告"]}, ctx) is True)
+    check("list.contains_none",
+          G._eval_leaf(st, {"metric": "evidence", "op": "contains_none",
+                            "value": ["监控"]}, ctx) is True)
+    # 文本分支不能受影响
+    check("文本 contains_any 仍正常",
+          G._eval_leaf(st, {"metric": "reply_text", "op": "contains_any",
+                            "value": ["a"]},
+                       {"reply_text": "abc", "history_text": "", "history": [],
+                        "player_text": ""}) is True)
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -460,6 +560,7 @@ if __name__ == "__main__":
                test_actor_direction, test_mood_consistency,
                test_behavioral_ooc_words,
                test_all_rules_have_hint, test_mask_mechanism,
+               test_mystery_scenario, test_list_metric_contains,
                test_stateless_isolation,
                test_role_injection):
         try:
