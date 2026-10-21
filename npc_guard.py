@@ -28,9 +28,68 @@ import time
 BASE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RULES = os.path.join(BASE, "config", "npc_rules.json")
 
+# ── 模糊/语义兜底（可选，默认关闭）──────────────────────────
+# 设计取舍（2026-10-21）：
+#   · **默认关闭**。词表够用时不开；漏检率不达标再由宿主显式开启。
+#     理由：兜底层换来的是漏检下降，代价是延迟上升与误拦风险。
+#     宁可让用户自己判断，也不替他默认做一个会改变判定的决定。
+#   · 可用两层：FuzzyConfig.ngram（纯 stdlib）→ SemanticMatcher（需宿主 embedding）。
+try:
+    import fuzzy as _fuzzy
+except Exception:                # pragma: no cover - 可选模块缺失时优雅降级
+    _fuzzy = None
+
+
+class FuzzyConfig:
+    """模糊匹配配置。由宿主在启动时设置。"""
+
+    def __init__(self, ngram=False, semantic=None, ngram_threshold=None):
+        self.ngram = bool(ngram)
+        self.semantic = semantic              # SemanticMatcher 或 None
+        self.ngram_threshold = ngram_threshold  # None → 用 fuzzy.NGRAM_THRESHOLD
+
+
+_FUZZY = FuzzyConfig()
+
+
+def enable_fuzzy(ngram=True, semantic=None, ngram_threshold=None):
+    """开启模糊/语义兜底。默认关闭；开启前请先读 fuzzy.py 的诚实边界。
+
+    ngram=True 时，纯词表漏检的「词序调换 / 近义替换」会被捞回。
+    纯语义改写（如「我人在那儿」vs「我当时就在现场」）只能靠 semantic。
+    """
+    global _FUZZY
+    _FUZZY = FuzzyConfig(ngram=ngram, semantic=semantic,
+                         ngram_threshold=ngram_threshold)
+    return _FUZZY
+
+
+def disable_fuzzy():
+    global _FUZZY
+    _FUZZY = FuzzyConfig()
+    return _FUZZY
+
+
+def _fuzzy_hit(haystack, needle):
+    """兜底命中判定。任一层命中即算命中。"""
+    if _FUZZY.semantic is not None:
+        try:
+            if _FUZZY.semantic.contains(haystack):
+                return True
+        except Exception:
+            pass                    # 语义层出错不得影响主判定
+    if _FUZZY.ngram and _fuzzy is not None:
+        try:
+            return _fuzzy.ngram_contains(haystack, needle,
+                                        _FUZZY.ngram_threshold)
+        except Exception:
+            return False
+    return False
+
 __all__ = [
     "check_npc_response", "fold_memory", "load_rules", "reset_rules_cache",
     "StateContractError", "TextContractError",
+    "enable_fuzzy", "disable_fuzzy",
 ]
 
 
@@ -186,10 +245,15 @@ def _eval_leaf(current_state, leaf, ctx):
             return False
         needles = [str(x).lower() for x in (target or [])]
         if op == "contains_any":
-            return _text_contains_any(hay, needles)
+            if _text_contains_any(hay, needles):
+                return True
+            # 精确未命中 → 走兜底层（默认关闭，见 enable_fuzzy）
+            return any(_fuzzy_hit(hay, n) for n in needles)
         if op == "contains_all":
             return all(n in hay for n in needles)
-        return not _text_contains_any(hay, needles)   # contains_none
+        # contains_none：兜底命中也算命中，故要一起排除
+        return not (_text_contains_any(hay, needles)
+                    or any(_fuzzy_hit(hay, n) for n in needles))
 
     val = _get_metric(current_state, metric, ctx)
     if op == "exists":
