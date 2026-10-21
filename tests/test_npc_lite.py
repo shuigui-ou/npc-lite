@@ -383,7 +383,7 @@ def test_role_injection():
         check("%s 可解析" % name, True)
 
         out = os.path.join(BASE, "config", "_t_%s.json" % name.replace(".ini", ""))
-        lib, defaults, mood0, rname, warns = inj.compile_recipe(cp, out)
+        lib, defaults, mood0, rname, warns, _lf = inj.compile_recipe(cp, out)
 
         # 生成物必须是引擎能吃的结构
         check("%s 生成合法规则" % name,
@@ -592,6 +592,78 @@ def test_fuzzy_fallback():
     check("开启兜底 → 捞回变体（拦下）", on == "reject", on)
 
 
+def test_mystery_preset():
+    print("\n[附加] 剧本杀 preset：INI 可编译 + 事实许可 + 切片隔离")
+    import importlib
+    inj = importlib.import_module("inject_role")
+    P = os.path.join(BASE, "config", "mystery_preset.ini")
+    out = os.path.join(BASE, "config", "_t_mystery.json")
+    cp = inj.load_recipe(P)
+    lib, defaults, mood0, name, warns, list_fields = inj.compile_recipe(cp, out)
+
+    check("mystery_preset 可编译", bool(lib["rules"]), "0 rules")
+    check("声明了证物清单（列表字段）", "evidence" in list_fields, str(list_fields))
+    check("evidence 进入 required（缺字段必须抛错）",
+          "evidence" in lib["schema"]["current_state"]["required"],
+          str(lib["schema"]["current_state"]["required"]))
+    check("preset 指定默认开 n-gram", lib.get("_enable_fuzzy") is True,
+          str(lib.get("_enable_fuzzy")))
+
+    # 秘密事实规则 + 铁证豁免
+    sec = [r for r in lib["rules"] if r["id"].startswith("SEC-")]
+    check("生成秘密事实规则（拦事实而非语气）", len(sec) >= 3, "SEC=%d" % len(sec))
+    exempt = [r for r in sec if "unless" in (r["when"] or {})]
+    check("秘密规则带铁证豁免（unless）", len(exempt) >= 1, "%d" % len(exempt))
+
+    # 双路径破防
+    tids = [t["id"] for t in lib["state_rules"]["transitions"]["rules"]]
+    check("含铁证破防（不要求先 panic）", "T-EVIDENCE-BREAK" in tids, str(tids))
+    check("含防线耗尽破防", "T-COMPOSURE-BREAK" in tids, str(tids))
+    check("跃迁不重复", len(tids) == len(set(tids)), str(tids))
+
+    # 逼问 delta 必须看 player_text（不是 reply_text）
+    press = [d for d in lib["state_rules"]["deltas"] if "PRESS" in d["id"]]
+    check("逼问 delta 看 player_text", bool(press) and
+          all(d["when"]["metric"] == "player_text" for d in press),
+          str([d["when"]["metric"] for d in press]))
+
+    # 引擎可加载 + 真实判定
+    st = dict(defaults); st["mood"] = mood0
+    G.disable_fuzzy()
+    r1 = G.check_npc_response(st, [], "我当时就在现场！",
+                              player_input="案发那晚你在哪", rules_path=out)
+    check("直球问 → 拦（事实许可）", r1["status"] == "reject", r1.get("reason", ""))
+    # 变体：精确漏检，兜底救场
+    r2_off = G.check_npc_response(st, [], "那会儿我在走廊尽头站着。",
+                                  player_input="那晚你没出门吧",
+                                  rules_path=out)
+    G.enable_fuzzy(ngram=True)
+    r2_on = G.check_npc_response(st, [], "那会儿我在走廊尽头站着。",
+                                 player_input="那晚你没出门吧",
+                                 rules_path=out)
+    check("变体：精确漏检（pass）", r2_off["status"] == "pass", r2_off["status"])
+    check("变体：n-gram 兜底救场（reject）", r2_on["status"] == "reject",
+          r2_on["status"])
+    G.disable_fuzzy()
+
+    # 多玩家切片隔离
+    a = dict(defaults); a["mood"] = mood0
+    b = {k: (list(v) if isinstance(v, list) else v) for k, v in defaults.items()}
+    b["mood"] = mood0
+    for _ in range(5):
+        rr = G.check_npc_response(a, [], "无可奉告。",
+                                  player_input="你有监控", rules_path=out)
+        for k, v in (rr.get("state_delta") or {}).items():
+            a[k] = a.get(k, 0) + v if isinstance(a.get(k), (int, float)) else v
+    check("A 被逼问 → A 的防线下降", a["composure"] < defaults["composure"],
+          "%s vs %s" % (a["composure"], defaults["composure"]))
+    check("B 完全未受影响（切片隔离）",
+          b["composure"] == defaults["composure"] and b["evidence"] == [],
+          "B.composure=%s" % b["composure"])
+
+    os.remove(out)
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -602,6 +674,7 @@ if __name__ == "__main__":
                test_behavioral_ooc_words,
                test_all_rules_have_hint, test_mask_mechanism,
                test_mystery_scenario, test_list_metric_contains,
+               test_mystery_preset,
                test_fuzzy_fallback,
                test_stateless_isolation,
                test_role_injection):
