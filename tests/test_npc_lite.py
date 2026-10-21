@@ -551,6 +551,47 @@ def test_list_metric_contains():
                         "player_text": ""}) is True)
 
 
+def test_fuzzy_fallback():
+    print("\n[附加] 模糊兜底：默认关闭 / 可选开启 / 不制造误拦")
+    import fuzzy as F
+
+    # 阈值是实测分离出来的：正例 ≥0.17，负例 =0.00
+    check("ngram 阈值来自实测（0.15）", F.NGRAM_THRESHOLD == 0.15,
+          str(F.NGRAM_THRESHOLD))
+
+    # 正例：词序/近义替换应被捞回
+    for text, needle in [("监控录像显示你在场", "现场监控"),
+                         ("我看见他进去了", "我亲眼看见"),
+                         ("那天晚上我就在走廊尽头站着", "我当时就在现场")]:
+        check("n-gram 救回变体：%s" % text[:14], F.ngram_contains(text, needle))
+
+    # 负例：无关句绝不能误报（这是底线）
+    for text in ["今天天气不错", "你是凶手吗", "昨晚我喝多了点", "我是凶手"]:
+        check("不误拦无关句：%s" % text[:14],
+              not F.ngram_contains(text, "我当时就在现场"))
+
+    # 诚实边界：纯语义改写 n-gram 救不了（必须写进测试，防止夸大宣传）
+    check("纯语义改写救不了（如实断言，非能力）",
+          not F.ngram_contains("我人在那儿，一整晚", "我当时就在现场"))
+
+    # 引擎层：默认关闭
+    P = os.path.join(BASE, "config", "mystery_rules.json")
+    st = {"mood": "calm", "trust": 40, "aggression": 30, "composure": 85,
+          "pressure": 0, "evidence": [], "role_tags": ["killer"]}
+    t = "那天晚上我就在走廊尽头站着，我看着你进去的"
+    try:
+        G.disable_fuzzy()
+        off = G.check_npc_response(st, [], t, player_input="你昨晚在哪",
+                                   rules_path=P)["status"]
+        G.enable_fuzzy(ngram=True)
+        on = G.check_npc_response(st, [], t, player_input="你昨晚在哪",
+                                  rules_path=P)["status"]
+    finally:
+        G.disable_fuzzy()
+    check("默认关闭 → 精确匹配结果（漏检）", off == "pass", off)
+    check("开启兜底 → 捞回变体（拦下）", on == "reject", on)
+
+
 if __name__ == "__main__":
     print("=" * 66)
     print("npc-lite 验收测试（四项标准，机器判定）")
@@ -561,6 +602,7 @@ if __name__ == "__main__":
                test_behavioral_ooc_words,
                test_all_rules_have_hint, test_mask_mechanism,
                test_mystery_scenario, test_list_metric_contains,
+               test_fuzzy_fallback,
                test_stateless_isolation,
                test_role_injection):
         try:
