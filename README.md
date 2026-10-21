@@ -6,7 +6,7 @@
 
 ```bash
 python demo.py --latency       # 完整闭环 + 延迟基准，无需任何 API
-python tests/test_npc_lite.py  # 71 项验收，机器判定
+python tests/test_npc_lite.py  # 82 项验收，机器判定
 ```
 
 ---
@@ -634,6 +634,58 @@ check_npc_response(state, history, npc_reply, player_input=玩家这轮说的话
 （必须先 panic 才能崩），结果玩家手持凶器时凶手依然镇定——
 这在剧本杀里说不通，玩家会以为引擎坏了。已改为双路径并行。
 
+### 漏检兜底（可选，默认关闭）
+
+关键词表挡不住同义改写。这是实测（2026-10-21）的真实数据：
+
+| 台词 | 词表 | 精确命中 | n-gram 覆盖率 |
+|---|---|---|---|
+| 监控录像显示你在场 | 现场监控 | ❌ | **0.33** ✅ 救到 |
+| 我看见他进去了 | 我亲眼看见 | ❌ | **0.25** ✅ 救到 |
+| 那天晚上我就在走廊尽头站着 | 我当时就在现场 | ❌ | **0.17** ✅ 勉强 |
+| **我人在那儿，一整晚** | 我当时就在现场 | ❌ | **0.00** ❌ **救不了** |
+| 今天天气不错 | 我当时就在现场 | ❌ | 0.00 ✅ 不误拦 |
+
+**最后一行是重点**：纯语义改写只能靠 embedding，`fuzzy.py` 的
+n-gram 层救不了。这一点被写成了断言（`test_fuzzy_fallback` 里有
+「纯语义改写救不了（如实断言，非能力）」这一条），避免未来被过度宣传。
+
+### 开启
+
+```python
+import npc_guard
+npc_guard.enable_fuzzy(ngram=True)      # 零依赖 n-gram 兜底
+npc_guard.disable_fuzzy()               # 关回精确匹配
+```
+
+**默认关闭**。理由：兜底换来漏检下降，代价是延迟翻倍和误拦风险——
+这是宿主该自己判断的决定，不该由我们替他默认。
+
+### 延迟代价（实测，剧本杀规则库）
+
+| | 平均 | p99 | 最大 |
+|---|---|---|---|
+| 关闭 | 0.0445ms | 0.0480ms | 0.7052ms |
+| 开启 n-gram | 0.0911ms | 0.0988ms | 0.1204ms |
+
+**+0.047ms，约 2 倍。** 对比一次 LLM 推理（500–3000ms）仍是万分之一量级，
+但别当它免费。
+
+### 语义层（需宿主提供 embedding）
+
+我们**不绑定任何模型库**——绑了就等于破坏零依赖和 Unity 可用性。
+embedding 函数由宿主注入：
+
+```python
+from fuzzy import SemanticMatcher
+m = SemanticMatcher(lambda t: your_embedding(t), threshold=0.82)
+for w in ["我当时就在现场", "我亲眼看见"]:
+    m.add(w)
+npc_guard.enable_fuzzy(ngram=True, semantic=m)
+```
+
+这样「我人在那儿，一整晚」这类纯语义改写才拦得住。
+
 ---
 
 ## 十一、自定义规则
@@ -669,7 +721,7 @@ check_npc_response(state, history, npc_reply, player_input=玩家这轮说的话
 ## 十二、验收结果（实测，非声称）
 
 ```
-通过 71 项，失败 0 项
+通过 82 项，失败 0 项
 ```
 
 | 验收项 | 标准 | 实测 |
