@@ -42,7 +42,19 @@ PRESETS = {
                  "傲娇公主：冷脸 → 信任满 → 害羞（示例配方）"),
     "grumpy": ("config/preset_grumpy.ini",
                "暴躁老哥：愤怒 → 见识到真本事 → 敬服（自带示例配方）"),
+    "mystery": ("config/mystery_preset.ini",
+                "剧本杀凶手：绝不承认在场 → 铁证破防（事实许可型，默认开 n-gram 兜底）"),
 }
+
+
+def secret_exempt_all(secret_exempt):
+    """汇总所有豁免铁证（铁证破防的门槛：任一硬证据即可触发）。"""
+    out = []
+    for tags in (secret_exempt or {}).values():
+        for t in tags:
+            if t not in out:
+                out.append(t)
+    return out
 
 
 # ── INI 解析工具 ──────────────────────────────────────────
@@ -88,6 +100,7 @@ def compile_recipe(cp, out_path=None):
 
     # ── 数值字段与边界 ──
     bounds, defaults = {}, {}
+    list_fields = {}          # 列表型状态字段（如 evidence 证物清单）
     if cp.has_section("数值"):
         for item in parse_list(cp["数值"].get("数值", "")):
             # 支持用 | 分隔多个字段
@@ -97,6 +110,12 @@ def compile_recipe(cp, out_path=None):
                 f, init, lo, hi = parse_pair(one.strip())
                 bounds[f] = [lo, hi]
                 defaults[f] = init
+        # 列表型字段（剧本杀证物清单）：证物:空列表
+        # 剧本杀的核心机制依赖列表成员判断，必须能声明（2026-10-21）。
+        for item in parse_list(cp["数值"].get("列表", "")):
+            for one in item.split("|"):
+                if one.strip():
+                    list_fields[one.strip()] = []
 
     # ── 情绪组：情绪名 → 该情绪下禁用的词 ──
     moods, mood_words = [], {}
@@ -132,9 +151,82 @@ def compile_recipe(cp, out_path=None):
             "severity": "hard",
         })
 
+    # ── 秘密事实规则（剧本杀核心，2026-10-21）────────────────────
+    # 情绪型规则拦「语气」，秘密型规则拦「**事实**」：
+    #   凶手掌握真相，但只要防线还在，绝不承认在场/死因/持有凶器。
+    #   纯 prompt 拦不住这种——没法让模型「注意别说自己在场」。
+    #   unless 挂 [豁免]：玩家先拿到对应铁证才允许说。
+    secret_exempt = {}
+    if cp.has_section("豁免"):
+        secret_exempt = {k.strip(): parse_list(v)
+                         for k, v in cp["豁免"].items()}
+    if cp.has_section("秘密"):
+        for i, (sname, sval) in enumerate(cp["秘密"].items(), 1):
+            words = parse_list(sval)
+            if not words:
+                continue
+            rule = {
+                "id": "SEC-%02d-%s" % (i, sname),
+                "mask_group": "secret_mask",
+                "when": {"all_of": [
+                    {"metric": "mood", "op": "in",
+                     "value": [m for m in moods if m != "broken"] or moods},
+                    {"metric": "reply_text", "op": "contains_any",
+                     "value": words},
+                ]},
+                "reason": "凶手绝不能承认「%s」—— 一旦出口身份暴露，剧本毁局" % sname,
+                "severity": "hard",
+            }
+            ex = secret_exempt.get(sname.strip())
+            if ex:
+                rule["when"]["unless"] = {
+                    "metric": "evidence", "op": "contains_any", "value": ex}
+            rules.append(rule)
+
     # ── 破冰跃迁 ──
     transitions = []
     trigger_tag = None
+    # 剧本杀双路径破防（[破防] 段）：铁证破防**不要求**先逼到 panic。
+    # 初版把两条路径串起来 → 玩家手持凶器时凶手依然镇定，
+    # 这在剧本杀里说不通（2026-10-21 修正）。
+    # 剧本杀双路径破防：铁证破防 **不要求** 先逼到 panic（2026-10-21）
+    # 初版把两条路径串起来，导致玩家手持凶器时凶手依然镇定——
+    # 这在剧本杀里说不通，玩家会以为引擎坏了。
+    if cp.has_section("破防"):
+        bf = cp["破防"]
+        ev_fld = (bf.get("铁证字段") or "").strip()
+        ev_mood = (bf.get("铁证破防情绪") or "broken").strip()
+        cd_fld = (bf.get("防线字段") or "").strip()
+        cd_mood = (bf.get("防线耗尽情绪") or "panic").strip()
+        try:
+            cd_thr = int(float(bf.get("防线阈值", "30")))
+        except ValueError:
+            cd_thr = 30
+        if ev_fld:
+            transitions.append({
+                "id": "T-EVIDENCE-BREAK",
+                "when": {"all_of": [
+                    {"metric": "mood", "op": "in",
+                     "value": [m for m in moods if m != ev_mood] or moods},
+                    {"metric": ev_fld, "op": "contains_any",
+                     "value": secret_exempt_all(secret_exempt)},
+                ]},
+                "set": {"mood": ev_mood, "trigger": "truth_out"},
+                "reason": "玩家出示铁证 → 抵赖已无意义，当场崩（**不需要先 panic**）",
+            })
+        if cd_fld:
+            transitions.append({
+                "id": "T-COMPOSURE-BREAK",
+                "when": {"all_of": [
+                    {"metric": "mood", "op": "in",
+                     "value": [m for m in moods if m != cd_mood]},
+                    {"metric": cd_fld, "op": "<", "value": cd_thr},
+                ]},
+                "set": {"mood": cd_mood},
+                "reason": "%s 跌破 %d → 防线耗尽" % (cd_fld, cd_thr),
+            })
+
+    # [破冰] 段（非剧本杀用；情绪型角色的常规破冰）
     if cp.has_section("破冰"):
         brk = cp["破冰"]
         fld = (brk.get("字段") or "").strip()
@@ -225,6 +317,33 @@ def compile_recipe(cp, out_path=None):
                 "reason": "聊到「%s」相关话题" % key,
             })
 
+    # ── 逼问段 → delta（**player_text 驱动**，剧本杀核心）─────────
+    # 关键区分（2026-10-21 实测踩过）：剧本杀的压力来自**玩家逼问**，
+    # 不是 NPC 自述。若 delta 只看 reply_text，压力曲线恒为 0，
+    # 防线永远不崩 —— 整个剧本杀场景就废了。
+    if cp.has_section("逼问"):
+        PRESSURE_PRESET = {
+            "玩家追问证据": {"pressure": "+8", "composure": "-3"},
+            "玩家指出矛盾": {"pressure": "+12", "composure": "-6"},
+            "玩家直接指认": {"pressure": "+6", "composure": "-4"},
+            "玩家示好共情": {"pressure": "-6", "trust": "+5"},
+        }
+        for key in cp["逼问"]:
+            words = parse_list(cp["逼问"][key])
+            if not words:
+                continue
+            apply = PRESSURE_PRESET.get(key.strip())
+            if not apply:
+                continue
+            deltas.append({
+                "id": "D-PRESS-%s" % key.strip()[:20],
+                "actor": "npc",
+                "when": {"metric": "player_text", "op": "contains_any",
+                         "value": words},
+                "apply": dict(apply),
+                "reason": "玩家%s → 防线/压力变化" % key.strip(),
+            })
+
     # ── 增量 ──
     if cp.has_section("增量"):
         for key, val in cp["增量"].items():
@@ -284,6 +403,7 @@ def compile_recipe(cp, out_path=None):
     # 这类错误不会报错，只会让「破冰永远不发生」，最难排查。
     # 故编译期显式警告，而不是静默跑出一个永不破冰的角色。
     warnings = []
+
     if cp.has_section("破冰"):
         brk = cp["破冰"]
         fld = (brk.get("字段") or "").strip()
@@ -298,10 +418,11 @@ def compile_recipe(cp, out_path=None):
                 warnings.append(
                     "没有任何 [增量]/[兴趣] 规则会增加「%s」—— 破冰阈值永远达不到。"
                     "请加一条 like:聊天关键词 ; %s:+5" % (fld, fld))
+    defaults.update(list_fields)
     # ── required 字段：引擎硬性要求 ──
-    required = ["mood"] + [f for f in ("trust", "aggression")
-                           if f in defaults or f not in defaults]
     required = ["mood", "trust", "aggression"]
+    if list_fields:
+        required = required + list(list_fields)
 
     lib = {
         "version": "1.0.0",
@@ -320,9 +441,6 @@ def compile_recipe(cp, out_path=None):
                         "bounds": bounds},
     }
 
-    if out_path:
-        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(lib, f, ensure_ascii=False, indent=2)
     lib["_break_field"] = (cp["破冰"].get("字段") or "").strip() \
         if cp.has_section("破冰") else ""
     try:
@@ -331,11 +449,20 @@ def compile_recipe(cp, out_path=None):
     except ValueError:
         lib["_break_threshold"] = 0
     lib["_initial_mood"] = initial_mood
-    return lib, defaults, initial_mood, name, warnings
+    lib["_enable_fuzzy"] = str(role.get("模糊兜底", "")).strip().lower() \
+        in ("true", "1", "yes", "是", "on")
+
+    # ⚠ 写盘必须放在**所有** lib 字段赋值之后（2026-10-21 修正）：
+    #   原先写盘点在 _break_field/_enable_fuzzy 之前，导致落盘文件
+    #   丢掉这些字段 → 「fuzzy开关: None」，剧本杀 preset 的兜底配置静默失效。
+    if out_path:
+        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(lib, f, ensure_ascii=False, indent=2)
+    return lib, defaults, initial_mood, name, warnings, list_fields
 
 
 # ── 演示：一条破冰曲线 ──────────────────────────────────────
-def play(lib, defaults, initial_mood, name, warnings=()):
+def play(lib, defaults, initial_mood, name, warnings=(), list_fields=None):
     path = os.path.join(BASE, "config", "_injected_role.json")
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(lib, f, ensure_ascii=False, indent=2)
@@ -486,10 +613,19 @@ def main():
 
     cp = load_recipe(recipe)
     out = a.out or os.path.join(BASE, "config", "generated_role.json")
-    lib, defaults, initial_mood, name, warnings = compile_recipe(cp, out)
+    lib, defaults, initial_mood, name, warnings, list_fields = compile_recipe(cp, out)
 
     if a.play:
-        play(lib, defaults, initial_mood, name, warnings)
+        # 剧本杀 preset 默认开启 n-gram 兜底（剧透漏检代价极高）
+        if lib.get("_enable_fuzzy"):
+            try:
+                import npc_guard as _ng
+                _ng.enable_fuzzy(ngram=True)
+                print("[fuzzy] 已开启 n-gram 兜底（该 preset 指定）")
+                print("-" * 68)
+            except Exception:
+                pass
+        play(lib, defaults, initial_mood, name, warnings, list_fields)
     else:
         print("已生成：%s" % out)
         print("  规则 %d 条 | 增量 %d 条 | 跃迁 %d 条 | 数值字段 %d 个"
