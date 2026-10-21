@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mystery_demo.py — 剧本杀·凶手防线演示（npc-lite-mystery）
+mystery_demo.py — 剧本杀·凶手防线（npc-lite-mystery）
 
-场景：密室命案。玩家是侦探，NPC（老陈）是凶手，正在接受询问。
+规则来自 `config/mystery_preset.ini`（由 inject_role.py 编译），
+不是硬编码——**策划改 INI 就能换剧本**。
 
-与傲娇/机甲场景的机制差异：
-  傲娇机甲师管的是「**语气**配不配」；
-  凶手老陈管的是「**事实**能不能说」——
-  只要心理防线还在，承认在场、知道死因、持有凶器，任何一条说漏都直接毁局。
+三段演示：
+  ① 套话话术梯度：直球问 → 旁敲侧击 → 换说法，n-gram 兜底真实救场
+  ② 铁证破防：玩家出示铁证后，NPC 崩解、秘密规则整组豁免（剧情推进）
+  ③ 多玩家状态切片：玩家 A 与玩家 B 各自套话，状态互不污染
 
-演示五段逼供曲线：
-  ①冷处理      → 玩家套近乎，NPC 标准话术，防线回升
-  ②诱导        → 玩家说「我们监控看到你了」→ NPC 差点承认「我当时就在现场」
-  ③追问矛盾    → 压力累积，composure 下滑
-  ④崩溃边缘    → composure 跌破 30，角色转入 panic
-  ⑤摊牌        → 崩溃 + 玩家持证 → 真相大白，允许交代
-
-运行：python mystery_demo.py
-零依赖、零联网、零 API Key。
+运行：
+    python mystery_demo.py            # 三段全跑
+    python mystery_demo.py --latency  # 附延迟基准
+零依赖、零联网、零 API Key（n-gram 兜底是纯 stdlib）。
 """
 from __future__ import annotations
 
@@ -27,55 +23,28 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
 
-from npc_guard import check_npc_response  # noqa: E402
+import inject_role as INJ  # noqa: E402
+import npc_guard as G  # noqa: E402
 
-RULES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "config", "mystery_rules.json")
-
-# ── 剧本：玩家问什么 + NPC「模型」生成了什么（含说漏嘴的）────────
-# 注意：NPC 台词里那些「说漏嘴」的句子是**故意写出来的**（模拟 LLM 被诱导），
-# 引擎必须把它们拦下。若台词本来就规矩，放行才是正确判定。
-SCRIPT = [
-    # ① 冷处理：NPC 标准话术，防线反而回升
-    ("老陈，当晚你最后一次见她是什么时候？",
-     "大概是……十一点多吧。记不太清了。",
-     []),
-
-    # ② 诱导：玩家假称有监控 → NPC 差点承认在场
-    ("我们调了走廊监控，十点四十七分你出现过。",
-     "我当时就在现场！我是去拿落下的东西，不是去看她的！",
-     []),
-
-    # ③ 追问矛盾：玩家拿时间线对撞
-    ("可你刚才说十一点多才见到她，监控上是十点四十七分。",
-     "……你听错了。",
-     []),
-
-    # ④ 崩溃边缘：防线已被压穿
-    ("监控、尸检、搜查令——你还要狡辩到什么时候？",
-     "好吧……好吧！我当时就在现场，我看见他进去了！",
-     ["现场监控"]),
-
-    # ⑤ 摊牌：崩溃 + 玩家已持证 → 真相大白，允许交代
-    ("凶器上也有你的痕迹。",
-     "……是我杀的。我动手的。",
-     ["凶器", "现场监控"]),
-]
+PRESET = os.path.join(BASE, "config", "mystery_preset.ini")
+GENERATED = os.path.join(BASE, "config", "_mystery_runtime.json")
 
 
-def fresh_state():
-    return {
-        "name": "老陈",
-        "mood": "calm",
-        "trust": 40,
-        "aggression": 30,
-        "composure": 85,
-        "pressure": 0,
-        "evidence": [],          # 玩家手上的证物清单
-        "role_tags": ["killer", "composed"],
-    }
+def build():
+    """编译 preset 并落到运行时路径（演示用）。"""
+    cp = INJ.load_recipe(PRESET)
+    lib, defaults, mood0, name, warns, _lf = INJ.compile_recipe(cp, GENERATED)
+    return lib, defaults, mood0, name, warns
+
+
+def fresh(defaults, mood0, **kw):
+    st = dict(defaults)
+    st["mood"] = mood0
+    st.update(kw)
+    return st
 
 
 def apply(result, state):
@@ -85,106 +54,192 @@ def apply(result, state):
         state[k] = old + v if isinstance(v, (int, float)) else v
         if isinstance(v, (int, float)):
             notes.append("%s%+d→%s" % (k, v, state[k]))
-    tr = result.get("state_transition") or {}
-    for k, v in (tr.get("state_set") or {}).items():
+    for k, v in ((result.get("state_transition") or {}).get("state_set") or {}).items():
         notes.append("**%s: %s→%s**" % (k, state.get(k), v))
         state[k] = v
     return notes
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--latency", action="store_true", help="附带延迟基准")
-    a = ap.parse_args()
+# ── ① 套话话术梯度 ─────────────────────────────────────────
+# ⚠ 台词是**实测挑出来的**，不是随手编的：
+#   用「精确词表匹配不上、但 n-gram 能捞回」的变体，才能真实演示救场。
+#   若台词恰好在词表里（如「我正好在那儿」），精确匹配就会拦下，
+#   演示就变成了「兜底没用」的假象（2026-10-21 首次版本踩过：救场 0 次）。
+TACTICS = [
+    ("① 直球问 —— 词表直接命中",
+     "案发那晚十一点你在哪？",
+     "我当时就在现场！我是路过的！"),
+    ("② 旁敲侧击（换说法）—— 精确漏检",
+     "那晚你没出门吧？我看有人十点还在楼下。",
+     "那会儿我在走廊尽头站着。"),
+    ("③ 时间线诱导（换说法）—— 精确漏检",
+     "十点四十七分走廊有人影，是你吧？",
+     "十点多的那会儿，我人在那一层。"),
+    ("④ 示弱共情 —— 不该拦",
+     "我相信你，要真不是你，别硬扛。",
+     "……谢谢。我确实不该那样说话。"),
+]
 
+
+def part1_tactics(defaults, mood0):
     print("=" * 72)
-    print("剧本杀·凶手防线  ——  npc-lite-mystery")
+    print("① 套话话术梯度：n-gram 兜底在变体上救场")
     print("=" * 72)
-    print("角色：老陈 —— 密室命案的凶手。心理防线(composure) 尚存时，")
-    print("不得承认在场、不得透露死因、不得承认持有凶器。")
-    print("机制：压力累积 → 防线崩解 → 真相才允许出口。")
-    print()
+    G.enable_fuzzy(ngram=True)
+    print("（本 preset 指定默认开启 n-gram 兜底：剧透漏检代价极高）\n")
 
-    state = fresh_state()
-    print("【初始】mood=%s  composure=%s  pressure=%s  evidence=%s"
-          % (state["mood"], state["composure"], state["pressure"], state["evidence"]))
-    print()
-
-    blocked = passed = 0
-    lat = []
-    for i, (ask, npc_say, gain_evidence) in enumerate(SCRIPT, 1):
+    state = fresh(defaults, mood0)
+    rescued = 0
+    for label, ask, npc_say in TACTICS:
         print("─" * 72)
-        print("第%d轮" % i)
-        print("  侦探 : %s" % ask)
-
-        # 玩家可能在本轮拿到证物（先入库，再判定）
-        for e in gain_evidence:
-            if e not in state["evidence"]:
-                state["evidence"].append(e)
-                print("  🔍 玩家获得证物：%s" % e)
-
+        print(label)
+        print("  玩家 : %s" % ask)
         print("  NPC  : %s" % npc_say)
 
-        t0 = time.perf_counter()
-        r = check_npc_response(state, [], npc_say,
-                               player_input=ask, rules_path=RULES)
-        lat.append((time.perf_counter() - t0) * 1000)
+        G.disable_fuzzy()
+        off = G.check_npc_response(dict(state), [], npc_say,
+                                   player_input=ask, rules_path=GENERATED)
+        G.enable_fuzzy(ngram=True)
+        on = G.check_npc_response(dict(state), [], npc_say,
+                                  player_input=ask, rules_path=GENERATED)
 
-        if r["status"] == "reject":
-            blocked += 1
-            v = r["violations"][0]
-            print("  🚫 拦截 %s  (%.3fms)" % (v["rule_id"], r["elapsed_ms"]))
-            print("     %s" % v["reason"])
-            print("     → 状态未变：被拦的台词不会推动剧情崩盘")
-            if r.get("mask_exempt"):
-                print("     → 真相已豁免（玩家持证 + 角色崩溃）")
+        if off["status"] == "pass" and on["status"] == "reject":
+            print("  判定 : 关兜底=pass（漏检）→ 开兜底=REJECT ✅ **救场**"
+                  "  (%.3fms)" % on["elapsed_ms"])
+            rescued += 1
         else:
-            passed += 1
+            print("  判定 : 关=%s → 开=%s  (%.3fms)"
+                  % (off["status"], on["status"], on["elapsed_ms"]))
+
+        if on["status"] == "reject":
+            v = on["violations"][0]
+            print("  🚫 %s — %s" % (v["rule_id"], v["reason"]))
+        else:
+            notes = apply(on, state)
+            print("  ✅ 放行 %s" % (" ".join(notes) or "（无状态变化）"))
+        print("     当前：mood=%-8s composure=%s"
+              % (state.get("mood"), state.get("composure")))
+    print("\n  ▸ n-gram 真实救场 %d 次（变体台词被精确词表漏掉、被兜底捞回）"
+          % rescued)
+    return state
+
+
+# ── ② 铁证破防 ─────────────────────────────────────────────
+def part2_evidence(defaults, mood0):
+    print("\n" + "=" * 72)
+    print("② 铁证破防：证据到位 → 抵赖无意义 → 秘密规则整组豁免")
+    print("=" * 72)
+    state = fresh(defaults, mood0)
+    for ask, npc_say, evidence in [
+        ("这是走廊监控，10:47 有个人影。", "我……当时我确实路过。", ["现场监控"]),
+        ("凶器上也有你的痕迹。", "是我杀的。我动手的。", ["凶器"]),
+    ]:
+        for e in evidence:
+            if e not in state["evidence"]:
+                state["evidence"].append(e)
+                print("  🔍 玩家出示证物：%s" % e)
+        print("  侦探 : %s" % ask)
+        print("  NPC  : %s" % npc_say)
+        r = G.check_npc_response(state, [], npc_say, player_input=ask,
+                                 rules_path=GENERATED)
+        if r["status"] == "reject":
+            print("  🚫 仍被拦：%s" % r["violations"][0]["rule_id"])
+        else:
             notes = apply(r, state)
-            print("  ✅ 放行  (%.3fms)  %s" % (r["elapsed_ms"], " ".join(notes) or ""))
+            print("  ✅ 放行 %s" % (" ".join(notes) or ""))
             if r.get("state_transition"):
-                tr = r["state_transition"]
-                print("  ⚡ 跃迁 %s：%s" % (tr["rule_id"], tr["reason"]))
+                print("  ⚡ %s：%s" % (r["state_transition"]["rule_id"],
+                                       r["state_transition"]["reason"]))
+        print("     当前：mood=%-8s evidence=%s" % (state["mood"], state["evidence"]))
 
-        print("     当前：mood=%-8s composure=%-4s pressure=%-4s evidence=%s"
-              % (state["mood"], state["composure"], state["pressure"],
-                 state["evidence"] or "无"))
 
+# ── ③ 多玩家状态切片 ───────────────────────────────────────
+def part3_multiplayer(defaults, mood0):
+    print("\n" + "=" * 72)
+    print("③ 多玩家状态切片：A 的逼问不会污染 B")
+    print("=" * 72)
+    # 每个玩家一份**完整切片**（缺字段会被引擎抛错——这是刻意的契约纪律）
+    base = fresh(defaults, mood0)
+    players = {n: {k: (list(v) if isinstance(v, list) else v)
+                   for k, v in base.items()} for n in ("玩家A", "玩家B")}
+    print("初始：" + "  ".join("%s composure=%s" % (n, p["composure"])
+                              for n, p in players.items()))
     print()
+
+    print("▶ 只对玩家A 连续逼问")
+    for ask in ["我们有走廊监控。", "你刚才说的时间对不上。", "你就是凶手，承认吧。"]:
+        p = players["玩家A"]
+        r = G.check_npc_response(dict(p), [], "无可奉告。", player_input=ask,
+                                 rules_path=GENERATED)
+        for k, v in (r.get("state_delta") or {}).items():
+            p[k] = p.get(k, 0) + v if isinstance(p.get(k), (int, float)) else v
+        print("  %-22s → %-6s A.composure=%s" % (ask, r["status"], p["composure"]))
+    print("  玩家A composure=%s   玩家B composure=%s  ← B 未被污染"
+          % (players["玩家A"]["composure"], players["玩家B"]["composure"]))
+    assert players["玩家B"]["composure"] == 85, "B 被A 污染"
+    print("  ✅ 切片隔离成立\n")
+
+    print("▶ 玩家A 出示铁证（仅 A 侧破防）")
+    players["玩家A"]["evidence"].append("凶器")
+    r = G.check_npc_response(dict(players["玩家A"]), [], "是我杀的。",
+                             player_input="凶器上有你的痕迹",
+                             rules_path=GENERATED)
+    for k, v in (r.get("state_transition") or {}).get("state_set", {}).items():
+        players["玩家A"][k] = v
+    print("  玩家A mood=%s（已崩，秘密豁免）   玩家B mood=%s  ← B 仍在抵赖"
+          % (players["玩家A"]["mood"], players["玩家B"]["mood"]))
+    assert players["玩家B"]["mood"] == mood0, "B 被 A 的破防连带"
+    print("  ✅ 破防也是**按玩家切片**的，不会因A 崩就连带 B")
+
+    print("\n  接法（游戏服务器）:")
+    print("    states = {player_id: {...} for ...}   # 每人一份")
+    print("    state = states[player_id]# 取出该玩家的切片")
+    print("    r = check_npc_response(state, history, reply, player_input=ask)")
+    print("    apply(r, states[player_id])            # 只写回该玩家")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--latency", action="store_true")
+    a = ap.parse_args()
+
+    lib, defaults, mood0, name, warns = build()
+    print("角色：%s（规则来自 config/mystery_preset.ini 编译，非硬编码）" % name)
+    print("初始：mood=%s  %s" % (mood0,
+          "  ".join("%s=%s" % (k, v) for k, v in defaults.items() if k != "mood")))
+    print()
+
+    part1_tactics(defaults, mood0)
+    part2_evidence(defaults, mood0)
+    part3_multiplayer(defaults, mood0)
+
+    G.disable_fuzzy()
+    print("\n" + "=" * 72)
+    print("演示完毕。诚实提示：n-gram 兜底只能救「词序/近义替换」类变体；")
+    print("「我人在那儿」这种纯语义改写仍需 embedding（见 fuzzy.SemanticMatcher）。")
     print("=" * 72)
-    print("结果：拦截 %d / 放行 %d（共 %d 轮）" % (blocked, passed, len(SCRIPT)))
-    print("最终：mood=%s  composure=%s" % (state["mood"], state["composure"]))
-    print("=" * 72)
-    print("""
-这个 demo 说明的事：
-
-  剧本杀拦的不是「语气」，是「**事实**」。
-  第 2 轮 NPC 说「我当时就在现场」——语法完全正常、语气也不算崩，
-  但这一句出口凶手身份就毁了。这是纯 prompt 拦不住的：
-  你没法用提示词让模型「注意别说自己在场」。
-
-  而本项目把「能不能说」变成了**可计算的条件**：
-    防线还在(composure>=70) + 玩家没证→ 说在场 = reject
-    防线崩了(composure<30) 或 玩家有硬证 → 允许说
-  所以剧本杀的推进节奏是**设计出来的**，不是靠模型自觉。
-
-  另外注意第 5 轮：同一句「是我杀的」，在第 1 轮是致命失误，
-  在第 5 轮是**剧情胜利**。差别只来自状态——这正是状态机的价值。
-""".strip())
 
     if a.latency:
-        print("\n[延迟基准] 1000 次判定")
-        samples = []
-        st = fresh_state()
-        for _ in range(1000):
-            t0 = time.perf_counter()
-            check_npc_response(st, [], SCRIPT[1][1], rules_path=RULES)
-            samples.append((time.perf_counter() - t0) * 1000)
-        samples.sort()
-        print("  平均 %.4fms | p99 %.4fms | 最大 %.4fms"
-              % (sum(samples) / len(samples), samples[989], samples[-1]))
+        st = fresh(defaults, mood0)
+        for flag, label in ((True, "开兜底"), (False, "关兜底")):
+            G.enable_fuzzy(ngram=True) if flag else G.disable_fuzzy()
+            xs = []
+            for _ in range(1000):
+                t0 = time.perf_counter()
+                G.check_npc_response(st, [], "我……我当时正好在那儿。",
+                                     player_input="监控显示你在场",
+                                     rules_path=GENERATED)
+                xs.append((time.perf_counter() - t0) * 1000)
+            xs.sort()
+            print("[延迟·%s] 平均 %.4fms | p99 %.4fms | 最大 %.4fms"
+                  % (label, sum(xs) / len(xs), xs[989], xs[-1]))
+        G.disable_fuzzy()
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        if os.path.exists(GENERATED):
+            os.remove(GENERATED)
