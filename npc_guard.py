@@ -90,7 +90,40 @@ __all__ = [
     "check_npc_response", "fold_memory", "load_rules", "reset_rules_cache",
     "StateContractError", "TextContractError",
     "enable_fuzzy", "disable_fuzzy",
+    "check_task", "AntiLazyChecker",
 ]
+
+
+# ── 反偷懒契约检查（2026-10-21）───────────────────────────
+# 与人设拦截是**两类不同的问题**：
+#   人设拦截 =「这句话配不配角色」
+#   反偷懒   =「活到底干了没」
+# 后者与规则库无关，是独立的能力，故单开入口而非塞进 check_npc_response。
+try:
+    from anti_lazy import AntiLazyChecker as _AntiLazyChecker
+except Exception:                # pragma: no cover
+    _AntiLazyChecker = None
+
+
+def check_task(reply, contract=None, prev_reply=None, user_input=None,
+               enable_filler=False):
+    """任务契约检查：判断模型这轮有没有真把活干了。
+
+    返回 {"status": "pass"|"reject", "reason": ..., "missing": [...], "types": [...]}
+
+    检查四类有客观判据的偷懒：
+      B 契约未完成 / C 承诺未兑现 / D 趋同化 / E 免责搪塞（默认关闭）
+
+    **不判断回答质量**——「太浅」「不够深入」没有客观阈值，
+    试图量化它只会引入主观偏见（实测 2026-10-21：MiniMax M3.1 在
+    4 组真实场景里零偷懒，所以「模型爱偷懒」这个前提本身要打问号）。
+    """
+    if _AntiLazyChecker is None:
+        raise StateContractError("anti_lazy 模块不可用")
+    chk = _AntiLazyChecker(enable_filler=enable_filler)
+    if contract:
+        chk.set_contract(list(contract))
+    return chk.check(reply, prev_reply=prev_reply, user_input=user_input)
 
 
 class StateContractError(ValueError):
